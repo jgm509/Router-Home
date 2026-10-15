@@ -1,0 +1,9 @@
+{
+	"id": "askey-cbe1v1k-light",
+	"name": "Askey CBE1V1K front light",
+	"version": "1.0.0",
+	"author": "Router Home contributors",
+	"description": "Drives the CBE1V1K's RGB front LED (AW210xx on I2C): blue = internet through WAN, white = through 5G, yellow = no internet, red = offline. Needs i2c-tools.",
+	"boards": ["askey,cbe1v1k"],
+	"provides": { "led": true }
+}

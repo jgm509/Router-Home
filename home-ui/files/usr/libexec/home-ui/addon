@@ -1,0 +1,120 @@
+#!/bin/sh
+# Router Home add-ons: install or remove.
+#   addon install <file.tar.gz>   (one top folder named like the add-on id)
+#   addon remove <id>
+#   addon autoinstall             install catalog add-ons made for this exact
+#                                 router model (not "*" ones), or newer versions
+# Prints one line of JSON: {"ok":true,...} or {"error":"..."}
+#
+# Inside the archive, <id>/ may contain:
+#   addon.json   required (see ADDONS.md)
+#   handler      answers led/fan/modem requests
+#   detect       optional: exit 0 only on routers the add-on fits
+#   files/       copied to / (files under files/etc/config/ are only
+#                copied when the router doesn't have them yet)
+#   install.sh   optional: runs after the files are copied
+#   remove.sh    optional: runs before the add-on is removed
+
+umask 022
+DIR=/usr/share/home-ui/addons
+CAT=/usr/share/home-ui/catalog
+WORK=/tmp/home-ui-addon.d
+
+err() { rm -rf "$WORK"; printf '{"error":"%s"}\n' "$1"; exit 0; }
+valid_id() { echo "$1" | grep -qE '^[a-z0-9][a-z0-9._-]{0,63}$'; }
+
+restart_users() {	# services that read add-on settings
+	[ -x /etc/init.d/home-ui-fan ] && /etc/init.d/home-ui-fan restart >/dev/null 2>&1
+	[ -x /etc/init.d/home-ui-light ] && /etc/init.d/home-ui-light restart >/dev/null 2>&1
+}
+
+do_remove() {	# id [quiet]
+	local d="$DIR/$1" f
+	[ -d "$d" ] || return 1
+	[ -x "$d/remove.sh" ] && ( cd "$d" && ./remove.sh ) >/dev/null 2>&1
+	if [ -f "$d/.installed-files" ]; then
+		while read -r f; do
+			case "$f" in /etc/config/*) continue ;; esac	# keep settings
+			[ -f "$f" ] || [ -L "$f" ] && rm -f "$f"
+		done < "$d/.installed-files"
+	fi
+	rm -rf "$d"
+	return 0
+}
+
+case "$1" in
+install)
+	f="$2"
+	[ -f "$f" ] || err "No add-on file was uploaded"
+	rm -rf "$WORK"; mkdir -p "$WORK"
+	list="$(tar -tzf "$f" 2>/dev/null)" || err "This is not a .tar.gz add-on file"
+	top="$(echo "$list" | sed 's#^\./##' | cut -d/ -f1 | sort -u)"
+	[ "$(echo "$top" | wc -l)" = 1 ] || err "The add-on must contain exactly one top folder"
+	valid_id "$top" || err "The add-on folder name must use only a-z, 0-9, dot, dash or underscore"
+	echo "$list" | grep -qE '(^/|(^|/)\.\.(/|$))' && err "The add-on contains unsafe paths"
+	tar -tvzf "$f" 2>/dev/null | grep -qE '^[lh]' && err "Links are not allowed in add-ons"
+	tar -xzf "$f" -C "$WORK" || err "The add-on file could not be unpacked"
+	src="$WORK/$top"
+	[ -f "$src/addon.json" ] || err "addon.json is missing"
+	id="$(jsonfilter -i "$src/addon.json" -e '@.id' 2>/dev/null)"
+	[ "$id" = "$top" ] || err "The id in addon.json must match the folder name ($top)"
+	name="$(jsonfilter -i "$src/addon.json" -e '@.name' 2>/dev/null)"
+	ver="$(jsonfilter -i "$src/addon.json" -e '@.version' 2>/dev/null)"
+	[ -n "$(jsonfilter -i "$src/addon.json" -e '@.boards[0]' 2>/dev/null)" ] || err "addon.json needs a boards list (use [\\\"*\\\"] for any router)"
+	for c in led fan modem; do
+		if [ "$(jsonfilter -i "$src/addon.json" -e "@.provides.$c" 2>/dev/null)" = true ] && [ ! -f "$src/handler" ]; then
+			err "addon.json says it provides $c, but there is no handler"
+		fi
+	done
+
+	# replacing an older version: let it clean up first (settings stay)
+	old=""; [ -d "$DIR/$id" ] && old="$(jsonfilter -i "$DIR/$id/addon.json" -e '@.version' 2>/dev/null)"
+	[ -d "$DIR/$id" ] && do_remove "$id"
+
+	mkdir -p "$DIR"
+	: > "$src/.installed-files"
+	if [ -d "$src/files" ]; then
+		( cd "$src/files" && find . -type f ) | sed 's#^\.##' | while read -r p; do
+			case "$p" in
+				/etc/config/*) [ -e "$p" ] && continue ;;
+			esac
+			mkdir -p "$(dirname "$p")"
+			cp -p "$src/files$p" "$p" && echo "$p" >> "$src/.installed-files"
+		done
+		rm -rf "$src/files"
+	fi
+	for x in handler detect install.sh remove.sh; do [ -f "$src/$x" ] && chmod 755 "$src/$x"; done
+	mv "$src" "$DIR/$id"
+	rm -rf "$WORK"
+	[ -x "$DIR/$id/install.sh" ] && ( cd "$DIR/$id" && ./install.sh ) >/dev/null 2>&1
+	restart_users
+	logger -t home-ui "add-on $id ${ver:+$ver }installed${old:+ (replaced $old)}"
+	printf '{"ok":true,"id":"%s","name":"%s","version":"%s","replaced":"%s"}\n' "$id" "$name" "$ver" "$old"
+	;;
+autoinstall)
+	board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+	[ -n "$board" ] || exit 0
+	for f in "$CAT"/*.tar.gz; do
+		[ -f "$f" ] || continue
+		id="$(basename "$f" .tar.gz)"
+		j="$(tar -xzOf "$f" "$id/addon.json" 2>/dev/null)"
+		echo "$j" | jsonfilter -e '@.boards[*]' 2>/dev/null | grep -qxF "$board" || continue
+		nv="$(echo "$j" | jsonfilter -e '@.version' 2>/dev/null)"
+		if [ -f "$DIR/$id/addon.json" ]; then
+			cv="$(jsonfilter -i "$DIR/$id/addon.json" -e '@.version' 2>/dev/null)"
+			[ "$cv" = "$nv" ] && continue
+			[ "$(printf '%s\n%s\n' "$cv" "$nv" | sort -V 2>/dev/null | tail -n1)" = "$nv" ] || continue
+		fi
+		"$0" install "$f" >/dev/null 2>&1 && logger -t home-ui "add-on $id $nv set up for $board"
+	done
+	;;
+remove)
+	valid_id "$2" || err "Unknown add-on"
+	do_remove "$2" || err "That add-on is not installed"
+	restart_users
+	logger -t home-ui "add-on $2 removed"
+	echo '{"ok":true}'
+	;;
+*)
+	echo "usage: $0 install <file.tar.gz> | remove <id>" >&2; exit 1 ;;
+esac

@@ -1,0 +1,254 @@
+#!/bin/sh
+# Router Home full backup: settings + apps + hand-added files.
+#
+#   fullbackup start            build /tmp/backup.tar.gz in the background
+#   fullbackup snapshot-start   same, but kept on the router for a firmware
+#                               update with "keep settings"
+#   fullbackup status           print the progress/report JSON
+#
+# The archive is a normal sysupgrade backup (restore works from LuCI too) with
+# extra files under /etc/home-ui/restore/ and a one-shot boot hook
+# (/etc/uci-defaults/95-home-ui-restore). Nothing outside /etc/config-style
+# settings is written to its real place by the restore itself: app files are
+# staged, and the boot hook decides what to install, comparing versions so a
+# newer copy already on the new firmware is never replaced by an older one.
+
+umask 022
+. /usr/share/libubox/jshn.sh
+
+STATUS=/tmp/home-ui/fullbackup.json
+OUT=/tmp/backup.tar.gz
+WORK=/tmp/home-ui-fullbackup
+MAXFILE=$((20 * 1024 * 1024))
+HOMEUI_FILES="/www/home /usr/libexec/rpcd/home-ui /usr/libexec/home-ui /usr/share/home-ui
+/usr/share/rpcd/acl.d/home-ui.json /usr/sbin/home-ui-fan /usr/sbin/home-ui-fan-gpio
+/etc/init.d/home-ui-fan /usr/share/luci/menu.d/home-ui.json /www/luci-static/resources/view/home-ui"
+
+PIDF=/tmp/home-ui/fullbackup.pid
+RD="$WORK/r"	# where the report lists are (moves with the staged copy)
+mkdir -p /tmp/home-ui
+
+status() {	# state message
+	json_init
+	json_add_string state "$1"
+	json_add_string message "$2"
+	json_add_string feed "$(cat "$RD/feed.txt" 2>/dev/null | tr '\n' ' ')"
+	json_add_string nonfeed "$(cut -d' ' -f1 "$RD/nonfeed.txt" 2>/dev/null | tr '\n' ' ')"
+	json_add_string skipped "$(cat "$WORK/skipped" 2>/dev/null | tr '\n' ' ')"
+	json_add_int extra_files "$(cat "$WORK/extra_count" 2>/dev/null || echo 0)"
+	json_add_int size "$( [ -f "$OUT" ] && [ "$1" = done ] && wc -c < "$OUT" || echo 0)"
+	json_add_string homeui "$(cat /usr/share/home-ui/version 2>/dev/null)"
+	json_dump > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
+}
+fail() { status failed "$1"; logger -t home-ui "full backup failed: $1"; rm -rf "$WORK-stage" "$WORK-cfg.tar.gz"; rm -f "$PIDF"; exit 1; }
+
+# ---------- package manager helpers ----------
+if command -v apk >/dev/null 2>&1; then PM=apk; elif command -v opkg >/dev/null 2>&1; then PM=opkg; else PM=none; fi
+
+pm_update() { case $PM in apk) apk update >/dev/null 2>&1 ;; opkg) opkg update >/dev/null 2>&1 ;; esac; }
+
+# packages added after the firmware was installed (names only)
+added_pkgs() {
+	case $PM in
+	apk)
+		strip() { sed -e 's/[<>=~].*//' -e '/^$/d' "$1" 2>/dev/null | sort -u; }
+		if [ -f /rom/etc/apk/world ]; then
+			strip /rom/etc/apk/world > "$WORK/rom.lst"
+			strip /etc/apk/world | awk 'NR==FNR{r[$0]=1;next} !($0 in r)' "$WORK/rom.lst" -
+		else strip /etc/apk/world; fi ;;
+	opkg)
+		awk '/^Package:/{p=$2} /^Status:.*user/{print p}' /usr/lib/opkg/status | sort -u > "$WORK/user.lst"
+		if [ -f /rom/usr/lib/opkg/status ]; then
+			awk '/^Package:/{print $2}' /rom/usr/lib/opkg/status | sort -u > "$WORK/rom.lst"
+			awk 'NR==FNR{r[$0]=1;next} !($0 in r)' "$WORK/rom.lst" "$WORK/user.lst"
+		else cat "$WORK/user.lst"; fi ;;
+	esac
+}
+
+pkg_list_file() {
+	case $PM in
+	apk) echo "/lib/apk/packages/$1.list" ;;
+	opkg) echo "/usr/lib/opkg/info/$1.list" ;;
+	esac
+}
+
+pkg_version() {
+	case $PM in
+	apk)
+		v="$(awk -v n="$1" '/^P:/{p=substr($0,3)} /^V:/{if(p==n){print substr($0,3); exit}}' /lib/apk/db/installed 2>/dev/null)"
+		[ -n "$v" ] || { v="$(apk list -I "$1" 2>/dev/null | awk '{print $1; exit}')"; v="${v#"$1"-}"; }
+		echo "$v" ;;
+	opkg) awk -v n="$1" '/^Package:/{p=$2} /^Version:/{if(p==n){print $2; exit}}' /usr/lib/opkg/status ;;
+	esac
+}
+
+pkg_deps() {
+	case $PM in
+	apk) awk -v n="$1" '/^P:/{p=substr($0,3)} /^D:/{if(p==n){print substr($0,3); exit}}' /lib/apk/db/installed 2>/dev/null ;;
+	opkg) awk -v n="$1" '/^Package:/{p=$2} /^Depends:/{if(p==n){sub(/^Depends: */,""); print; exit}}' /usr/lib/opkg/status ;;
+	esac | tr ', ' '\n\n' | sed -e 's/[<>=~(].*//' -e '/^$/d' -e '/:/d' | sort -u
+}
+
+in_feed() {
+	case $PM in
+	apk) apk policy "$1" 2>/dev/null | grep -v 'lib/apk/db/installed' | grep -Eq '://|^[[:space:]]+/' ;;
+	opkg) opkg list "$1" 2>/dev/null | grep -q "^$1 " ;;
+	*) return 1 ;;
+	esac
+}
+
+# copy a file or symlink to a staging root, keeping its path
+stage() {	# root path
+	[ -e "$2" ] || [ -L "$2" ] || return 0
+	if [ -f "$2" ] && [ ! -L "$2" ] && [ "$(wc -c < "$2")" -gt $MAXFILE ]; then echo "$2" >> "$WORK/skipped"; return 0; fi
+	mkdir -p "$1$(dirname "$2")"
+	cp -a "$2" "$1$2" 2>/dev/null
+}
+
+build() {	# destination restore dir
+	R="$1"
+	rm -rf "$WORK"; mkdir -p "$WORK/r"
+	: > "$WORK/skipped"
+	status running 'Checking which apps are installed…'
+	[ "$PM" != none ] || fail 'No package manager found'
+	pm_update || fail 'Could not reach the OpenWrt package servers. The router needs internet to make a full backup.'
+
+	added_pkgs > "$WORK/added"
+	: > "$WORK/r/feed.txt"; : > "$WORK/r/nonfeed.txt"; : > "$WORK/r/deps.txt"
+	while read -r n; do
+		[ -n "$n" ] || continue
+		[ "$n" = home-ui ] && continue
+		# installed at all?
+		[ -n "$(pkg_version "$n")" ] || continue
+		if in_feed "$n"; then echo "$n" >> "$WORK/r/feed.txt"
+		else
+			case "$n" in kmod-*) echo "$n (kernel module, can't be carried to new firmware)" >> "$WORK/skipped"; continue ;; esac
+			echo "$n $(pkg_version "$n")" >> "$WORK/r/nonfeed.txt"
+			pkg_deps "$n" >> "$WORK/r/deps.txt"
+		fi
+	done < "$WORK/added"
+	# what the saved apps need, minus what is saved or listed already
+	sort -u "$WORK/r/deps.txt" | awk 'NR==FNR{x[$1]=1;next} !($1 in x)' "$WORK/r/nonfeed.txt" - | awk 'NR==FNR{x[$1]=1;next} !($1 in x)' "$WORK/r/feed.txt" - > "$WORK/deps.tmp"
+	mv "$WORK/deps.tmp" "$WORK/r/deps.txt"
+
+	status running 'Copying apps that are not in the OpenWrt feeds…'
+	while read -r n v; do
+		lf="$(pkg_list_file "$n")"
+		[ -f "$lf" ] || continue
+		cp "$lf" "$WORK/r/$n.list"
+		while read -r f; do stage "$WORK/r/files/pkg/$n" "$f"; done < "$lf"
+	done < "$WORK/r/nonfeed.txt"
+
+	status running 'Copying Router Home…'
+	cat /usr/share/home-ui/version > "$WORK/r/homeui.ver" 2>/dev/null
+	for f in $HOMEUI_FILES; do
+		if [ -d "$f" ]; then find "$f" \( -type f -o -type l \) | while read -r x; do stage "$WORK/r/files/home-ui" "$x"; done
+		else stage "$WORK/r/files/home-ui" "$f"; fi
+	done
+
+	status running 'Looking for files you added by hand…'
+	# everything any package owns
+	cat /lib/apk/packages/*.list /usr/lib/opkg/info/*.list 2>/dev/null | sort -u > "$WORK/owned"
+	: > "$WORK/extra"
+	if [ -d /overlay/upper ]; then
+		( cd /overlay/upper && find . -xdev \( -type f -o -type l \) | sed 's#^\.##' ) > "$WORK/upper"
+	else
+		find /etc/tailscale /etc/protonvpn /etc/status-led* /usr/sbin/status-led /etc/init.d/status-led \( -type f -o -type l \) 2>/dev/null > "$WORK/upper"
+	fi
+	for f in $HOMEUI_FILES; do echo "$f"; done > "$WORK/homeui.paths"
+	awk 'NR==FNR{o[$0]=1;next} !($0 in o)' "$WORK/owned" "$WORK/upper" | grep -Ev \
+		'^/(lib/apk|usr/lib/opkg|etc/apk|etc/opkg|lib/modules|var|tmp|overlay|rom|proc|sys|dev|boot|etc/rc\.d|etc/uci-defaults|etc/home-ui/restore|sysupgrade)(/|$)|\.apk-new$|-opkg$|^/etc/luci-uploads/' \
+		| while read -r f; do
+			skip=0
+			while read -r hp; do case "$f" in "$hp"|"$hp"/*) skip=1; break ;; esac; done < "$WORK/homeui.paths"
+			[ $skip = 1 ] && continue
+			echo "$f"
+		done > "$WORK/extra"
+	while read -r f; do stage "$WORK/r/files/extra" "$f"; done < "$WORK/extra"
+	wc -l < "$WORK/extra" | tr -d ' ' > "$WORK/extra_count"
+
+	# services that were switched on or off
+	: > "$WORK/r/services_on.txt"; : > "$WORK/r/services_off.txt"
+	for s in /etc/init.d/*; do
+		[ -x "$s" ] || continue
+		if "$s" enabled 2>/dev/null; then basename "$s" >> "$WORK/r/services_on.txt"
+		else basename "$s" >> "$WORK/r/services_off.txt"; fi
+	done
+
+	echo "$PM" > "$WORK/r/pm"
+	{ date; cat /proc/sys/kernel/hostname; [ -f /etc/openwrt_release ] && . /etc/openwrt_release; echo "$DISTRIB_DESCRIPTION"; } > "$WORK/r/created"
+	cp /usr/libexec/home-ui/restore-finish "$WORK/r/finish.sh"
+	chmod 755 "$WORK/r/finish.sh"
+
+	rm -rf "$R"; mkdir -p "$(dirname "$R")"
+	mv "$WORK/r" "$R"
+	RD="$R"
+}
+
+write_hook() {	# root
+	mkdir -p "$1/etc/uci-defaults"
+	cat > "$1/etc/uci-defaults/95-home-ui-restore" <<'EOF'
+#!/bin/sh
+# Router Home: finish restoring apps after a full backup was restored.
+[ -x /etc/home-ui/restore/finish.sh ] && [ ! -f /etc/home-ui/restore/done ] && {
+	( sleep 20; /etc/home-ui/restore/finish.sh ) </dev/null >/dev/null 2>&1 &
+}
+exit 0
+EOF
+	chmod 755 "$1/etc/uci-defaults/95-home-ui-restore"
+}
+
+case "$1" in
+create)
+	S="$WORK-stage"
+	rm -rf "$S" "$OUT"; mkdir -p "$S"
+	echo $$ > "$PIDF"
+	status running 'Saving your settings…'
+	sysupgrade -b "$WORK-cfg.tar.gz" >/dev/null 2>&1 || fail 'The settings backup failed'
+	tar -xzf "$WORK-cfg.tar.gz" -C "$S" || fail 'The settings backup could not be read'
+	# an older app snapshot kept for a firmware update is replaced by this one
+	rm -rf "$S/etc/home-ui/restore" "$S/lib/upgrade/keep.d/home-ui-restore"
+	build "$S/etc/home-ui/restore"
+	write_hook "$S"
+	status running 'Packing the backup…'
+	tar -czf "$OUT.tmp" -C "$S" . || fail 'Not enough memory to pack the backup'
+	mv "$OUT.tmp" "$OUT"
+	# keep the lists for the summary, then free the copy
+	mkdir -p "$WORK/rep"; cp "$RD/feed.txt" "$RD/nonfeed.txt" "$WORK/rep/" 2>/dev/null; RD="$WORK/rep"
+	rm -rf "$S" "$WORK-cfg.tar.gz" "$PIDF"
+	status done 'Backup ready'
+	logger -t home-ui "full backup created ($(wc -c < "$OUT") bytes)"
+	;;
+snapshot)
+	# kept on the router: sysupgrade with "keep settings" carries it over
+	echo $$ > "$PIDF"
+	build "$WORK/snap"
+	need=$(du -sk "$WORK/snap" | cut -f1)
+	free=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
+	[ -z "$free" ] || [ "$free" -gt $((need + 2048)) ] || { rm -rf "$WORK/snap"; fail "Not enough space on the router for the app snapshot (${need} KB needed)"; }
+	rm -rf /etc/home-ui/restore; mkdir -p /etc/home-ui
+	mv "$WORK/snap" /etc/home-ui/restore 2>/dev/null || { cp -a "$WORK/snap" /etc/home-ui/restore && rm -rf "$WORK/snap"; }
+	RD=/etc/home-ui/restore
+	write_hook ""
+	mkdir -p /lib/upgrade/keep.d
+	printf '%s\n' /etc/home-ui/restore/ /etc/uci-defaults/95-home-ui-restore > /lib/upgrade/keep.d/home-ui-restore
+	rm -f "$PIDF"
+	status done 'Apps saved for the update'
+	;;
+start|snapshot-start)
+	[ "$1" = start ] && mode=create || mode=snapshot
+	if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+		cat "$STATUS"; exit 0
+	fi
+	rm -f "$STATUS"
+	status running 'Starting…'
+	( "$0" "$mode" ) </dev/null >/dev/null 2>&1 &
+	echo $! > "$PIDF"
+	cat "$STATUS"
+	;;
+status)
+	cat "$STATUS" 2>/dev/null || echo '{"state":"idle"}'
+	;;
+*)
+	echo "usage: $0 start|snapshot-start|status" >&2; exit 1 ;;
+esac

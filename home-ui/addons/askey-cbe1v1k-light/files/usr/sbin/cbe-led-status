@@ -1,0 +1,59 @@
+#!/bin/sh
+# Show router status on the CBE1V1K front LED.
+#   blue    = internet OK through the WAN port
+#   white   = internet OK through the 5G modem
+#   yellow  = uplink up (default route) but internet unreachable
+#   red     = no uplink at all
+# (breathing is set by the init script while booting)
+
+. /lib/functions.sh
+
+config_load cbe-led
+config_get BR main brightness 96
+config_get INTERVAL main interval 15
+config_get MODEM_DEVS main modem_devices "wwan* mhi_*"
+HOSTS=""
+add_host() { HOSTS="$HOSTS $1"; }
+config_list_foreach main check_host add_host
+[ -n "$HOSTS" ] || HOSTS="1.1.1.1 8.8.8.8"
+
+last=""
+set_state() {
+	[ "$1" = "$last" ] && return
+	/usr/bin/cbe-led "$1" "$BR" && last="$1"
+	logger -t cbe-led "status: $1${2:+ ($2)}"
+}
+
+# device the router would use to reach the internet right now
+uplink_dev() {
+	ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1
+}
+
+is_modem() {
+	for p in $MODEM_DEVS; do
+		case "$1" in $p) return 0 ;; esac
+	done
+	return 1
+}
+
+online() {
+	for h in $HOSTS; do
+		ping -c 1 -W 3 "$h" >/dev/null 2>&1 && return 0
+	done
+	return 1
+}
+
+while true; do
+	dev=""
+	[ -n "$(ip route show default 2>/dev/null)" ] && dev="$(uplink_dev)"
+	if [ -z "$dev" ]; then
+		set_state red
+	elif ! online; then
+		set_state yellow "$dev"
+	elif is_modem "$dev"; then
+		set_state white "$dev"
+	else
+		set_state blue "$dev"
+	fi
+	sleep "$INTERVAL"
+done

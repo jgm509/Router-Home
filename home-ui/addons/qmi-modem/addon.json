@@ -1,0 +1,9 @@
+{
+	"id": "qmi-modem",
+	"name": "QMI modem status (uqmi)",
+	"version": "1.0.0",
+	"author": "Router Home contributors",
+	"description": "Shows carrier and signal on the Mobile page for routers that connect their 4G/5G modem with OpenWrt's qmi protocol (uqmi) instead of ModemManager. Only active when a qmi connection is set up.",
+	"boards": ["*"],
+	"provides": { "modem": true }
+}

@@ -1,0 +1,39 @@
+#!/bin/sh
+# Router Home add-on handler: Askey CBE1V1K front light
+#   handler led info | set | test   (JSON on stdin)
+. /usr/share/libubox/jshn.sh
+json_load "$(cat)"
+
+case "$1 $2" in
+"led info")
+	en=true; [ "$(uci -q get cbe-led.main.enabled)" = 0 ] && en=false
+	cat <<J
+{"enabled":$en,"brightness":$(uci -q get cbe-led.main.brightness || echo 96),
+ "description":"Blue: WAN · white: 5G · yellow: no internet · red: offline",
+ "colors":[{"id":"blue","label":"WAN","css":"#3b7cff"},{"id":"white","label":"5G","css":"#f2f5f8"},
+  {"id":"yellow","label":"No internet","css":"#f0b429"},{"id":"red","label":"Offline","css":"#ff4d55"},
+  {"id":"breath","label":"Starting","css":"linear-gradient(#fff,#8899aa)"}]}
+J
+	;;
+"led set")
+	json_get_var enabled enabled
+	json_get_var brightness brightness
+	[ "$enabled" = 1 ] || enabled=0
+	uci -q set cbe-led.main.enabled="$enabled"
+	[ "$brightness" -ge 1 ] 2>/dev/null && [ "$brightness" -le 255 ] && uci -q set cbe-led.main.brightness="$brightness"
+	uci -q commit cbe-led
+	/etc/init.d/cbe-led restart >/dev/null 2>&1
+	[ "$enabled" = 0 ] && /usr/bin/cbe-led off >/dev/null 2>&1
+	echo '{"ok":true}'
+	;;
+"led test")
+	json_get_var color color
+	case "$color" in white|red|green|blue|yellow|cyan|magenta|breath|off) ;; *) color=white ;; esac
+	/etc/init.d/cbe-led stop >/dev/null 2>&1
+	/usr/bin/cbe-led "$color" "$(uci -q get cbe-led.main.brightness || echo 96)" >/dev/null 2>&1
+	( sleep 4; /etc/init.d/cbe-led start >/dev/null 2>&1 ) </dev/null >/dev/null 2>&1 &
+	echo '{"ok":true}'
+	;;
+*)
+	echo '{"error":"not supported"}' ;;
+esac

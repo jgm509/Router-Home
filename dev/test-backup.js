@@ -1,0 +1,21 @@
+const { chromium } = require('playwright');
+const PORT = process.env.PORT || 8088;
+(async () => {
+  const b = await chromium.launch(); const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', deviceScaleFactor: 2, acceptDownloads: true });
+  const p = await ctx.newPage();
+  const errs = []; p.on('pageerror', e => errs.push(e.message)); p.on('console', m => m.type() === 'error' && errs.push(m.text()));
+  await p.goto('http://localhost:' + PORT + '/home/'); await p.fill('input[name=password]', 'test'); await p.click('button[type=submit]'); await p.waitForTimeout(1500);
+  await p.goto('http://localhost:' + PORT + '/home/#/system'); await p.waitForTimeout(1500);
+  await p.screenshot({ path: 'shots/fb0-system.png' });
+  await p.click('.row:has-text("Back up")'); await p.waitForTimeout(500);
+  await p.screenshot({ path: 'shots/fb1-sheet.png' });
+  const dl = p.waitForEvent('download');
+  await p.click('.sheet button:has-text("Back up everything")');
+  const d = await dl; console.log('download name:', d.suggestedFilename());
+  await p.waitForTimeout(800);
+  await p.screenshot({ path: 'shots/fb2-done.png' });
+  await p.click('.sheet button:has-text("Done")'); await p.waitForTimeout(400);
+  await p.click('.row:has-text("Update firmware")'); await p.waitForTimeout(500);
+  await p.screenshot({ path: 'shots/fb3-fw.png' });
+  console.log(errs.join('\n') || 'no errors'); await b.close();
+})();

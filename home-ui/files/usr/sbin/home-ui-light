@@ -1,0 +1,43 @@
+#!/bin/sh
+# Router Home status light for any router: shows whether the internet works
+# on the router's own status LED(s), found automatically (see light.sh).
+#   online  -> the normal-operation LED (green/blue/white) on
+#   offline -> the problem LED (red/amber) on, or the normal LED blinking
+
+. /lib/functions.sh
+. /usr/share/home-ui/light.sh
+
+config_load home-ui-light
+config_get INTERVAL main interval 15
+HOSTS=""
+add_host() { HOSTS="$HOSTS $1"; }
+config_list_foreach main check_host add_host
+[ -n "$HOSTS" ] || HOSTS="1.1.1.1 8.8.8.8 9.9.9.9"
+
+OK="$(light_ok)"; BAD="$(light_bad)"
+[ -n "$OK$BAD" ] || { logger -t home-ui-light "no status LED found"; exit 0; }
+logger -t home-ui-light "using ${OK##*/}${BAD:+ and ${BAD##*/}}"
+
+last=""
+show() {
+	[ "$1" = "$last" ] && return
+	case "$1" in
+		online)  light_set "$BAD" off; light_set "$OK" on ;;
+		offline) if [ -n "$BAD" ]; then light_set "$OK" off; light_set "$BAD" on; else light_set "$OK" blink; fi ;;
+	esac
+	last="$1"
+	logger -t home-ui-light "internet $1"
+}
+
+online() {
+	[ -n "$(ip route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ] || return 1
+	for h in $HOSTS; do ping -c 1 -W 3 "$h" >/dev/null 2>&1 && return 0; done
+	return 1
+}
+
+trap 'light_set "$BAD" off; light_set "$OK" on; exit 0' TERM INT
+while true; do
+	if online; then show online; else show offline; fi
+	sleep "$INTERVAL" &
+	wait $!
+done

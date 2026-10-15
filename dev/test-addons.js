@@ -1,0 +1,25 @@
+const { chromium } = require('playwright');
+const PORT = process.env.PORT || 8088;
+const S = 'shots/';
+(async () => {
+  const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', deviceScaleFactor: 2 });
+  const errs = []; p.on('pageerror', e => errs.push(e.message)); p.on('console', m => m.type() === 'error' && errs.push(m.text()));
+  p.on('dialog', d => d.accept());
+  await p.goto('http://localhost:' + PORT + '/home/'); await p.fill('input[name=password]', 'test'); await p.click('button[type=submit]'); await p.waitForTimeout(1500);
+  await p.goto('http://localhost:' + PORT + '/home/#/system'); await p.waitForTimeout(1500);
+  await p.click('.row:has-text("Status light")'); await p.waitForTimeout(800);
+  await p.screenshot({ path: S + 'ad1-light.png' });
+  await p.click('.sheet .row:has-text("Show internet status") input'); await p.click('.sheet button:has-text("Save")'); await p.waitForTimeout(600);
+  await p.click('.row:has-text("Add-ons")'); await p.waitForTimeout(800);
+  await p.screenshot({ path: S + 'ad2-addons.png' });
+  await p.click('.sheet .row:has-text("QMI modem")'); await p.waitForTimeout(500);
+  await p.screenshot({ path: S + 'ad3-detail.png' });
+  await p.locator('button', { hasText: /^Install$/ }).last().click(); await p.waitForTimeout(2500);
+  await p.goto('http://localhost:' + PORT + '/home/#/system'); await p.waitForTimeout(1200);
+  await p.click('.row:has-text("Add-ons")'); await p.waitForTimeout(800);
+  console.log('installed now:', (await p.textContent('.sheet')).match(/QMI modem status \(uqmi\) 1\.0\.0[^A]*active/) ? 'QMI active' : 'not found');
+  await p.goto('http://localhost:' + PORT + '/home/#/network/mobile'); await p.waitForTimeout(1500);
+  await p.screenshot({ path: S + 'ad4-mobile.png' });
+  console.log('mobile:', (await p.textContent('#view')).replace(/\s+/g, ' ').slice(0, 220));
+  console.log(errs.join('\n') || 'no errors'); await b.close();
+})();

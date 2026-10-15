@@ -1,0 +1,9 @@
+{
+	"id": "spectrum-sax1v1k-fan",
+	"name": "Spectrum SAX1V1K fan",
+	"version": "1.0.0",
+	"author": "Router Home contributors",
+	"description": "The SAX1V1K's fan is on GPIO 27 and its speed sensor on GPIO 29, which OpenWrt doesn't describe yet. Router Home then sets the speed by switching the pin quickly. Needs gpiod-tools.",
+	"boards": ["spectrum,sax1v1k"],
+	"fan_gpio": { "pin": 27, "tach": 29 }
+}

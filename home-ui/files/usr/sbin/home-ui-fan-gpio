@@ -1,0 +1,121 @@
+#!/bin/sh
+# Fan control for routers whose fan is driven by a plain GPIO while the
+# hardware PWM driver isn't available. The pin comes from uci fan.main.gpio
+# or an add-on's "fan_gpio" (for example the Spectrum SAX1V1K add-on: fan on
+# GPIO 27, speed sensor on GPIO 29). Speed is set by switching
+# the pin on and off quickly (software PWM, gpioset --toggle, libgpiod 2).
+#   mode auto   : off below 50 C, 30% from 50 C, 60% from 65 C, 100% from 80 C
+#   mode manual : fixed speed; full speed above safety_temp
+# With libgpiod 1.x (no --toggle) the fan is only switched on/off.
+# When the service stops, the fan is left ON at full speed (fail-safe).
+
+. /lib/functions.sh
+. /usr/share/home-ui/fan-backend.sh
+
+PIN="$(fan_gpio)"
+[ -n "$PIN" ] || { logger -t fan "no fan GPIO configured"; exit 0; }
+command -v gpioset >/dev/null || { logger -t fan "gpioset missing: install gpiod-tools"; exit 0; }
+
+config_load fan
+config_get MODE main mode auto
+config_get SPEED main speed 100
+config_get SAFE main safety_temp 85
+config_get CHIP main gpiochip gpiochip0
+config_get PERIOD main period_us 1000
+TACH="$(fan_tach)"
+
+STATE=/tmp/home-ui/fan-state
+RPMF=/tmp/home-ui/fan-rpm
+mkdir -p /tmp/home-ui
+HOLD=""; cur=""
+
+if gpioset --help 2>&1 | grep -q -- '--toggle'; then V2=1; else V2=0; fi
+
+hold() {
+	if [ $V2 = 1 ]; then
+		gpioset -c "$CHIP" "$@" </dev/null >/dev/null 2>&1 &
+	else
+		gpioset --mode=signal "$CHIP" "$@" </dev/null >/dev/null 2>&1 &
+	fi
+	HOLD=$!
+}
+
+# set_fan PERCENT [reason]
+set_fan() {
+	local p=$1 on
+	[ $V2 = 1 ] || { [ "$p" -gt 0 ] && p=100; }
+	[ "$p" = "$cur" ] && return
+	[ -n "$HOLD" ] && { kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null; }
+	if [ "$p" -ge 100 ]; then hold "$PIN=1"
+	elif [ "$p" -le 0 ]; then hold "$PIN=0"
+	else
+		on=$((PERIOD * p / 100))
+		hold -t "${on}us,$((PERIOD - on))us" "$PIN=1"
+	fi
+	cur=$p
+	echo "$p" > "$STATE"
+	[ "$p" = 0 ] && echo 0 > "$RPMF"
+	logger -t fan "fan ${p}%${2:+ ($2)}"
+}
+
+hottest() {
+	local m=0 t f
+	for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp1_input; do
+		t="$(cat "$f" 2>/dev/null)" || continue
+		[ "$t" -gt "$m" ] 2>/dev/null && [ "$t" -lt 150000 ] && m=$t
+	done
+	echo "$m"
+}
+
+# count speed-sensor pulses for 2 s (2 pulses per turn)
+measure_rpm() {
+	[ -n "$TACH" ] && [ $V2 = 1 ] && command -v gpiomon >/dev/null || return
+	[ "$cur" = 0 ] && return
+	gpiomon -c "$CHIP" -b pull-up -e falling "$TACH" > /tmp/home-ui/tach 2>/dev/null &
+	local m=$!
+	sleep 2; kill "$m" 2>/dev/null; wait "$m" 2>/dev/null
+	echo $(( $(wc -l < /tmp/home-ui/tach) * 15 )) > "$RPMF"
+}
+
+# automatic curve with 3 C of hysteresis when slowing down
+auto_speed() {
+	local c=$1 want
+	if [ "$c" -ge 80 ]; then want=100
+	elif [ "$c" -ge 65 ]; then want=60
+	elif [ "$c" -ge 50 ]; then want=30
+	else want=0
+	fi
+	if [ -n "$cur" ] && [ "$want" -lt "$cur" ]; then
+		c=$((c + 3))
+		if [ "$c" -ge 80 ]; then want=100
+		elif [ "$c" -ge 65 ]; then want=60
+		elif [ "$c" -ge 50 ]; then want=30
+		fi
+		[ "$want" -gt "$cur" ] && want=$cur
+	fi
+	echo "$want"
+}
+
+# release any line holder left from an earlier run
+for p in $(pgrep -f "gpioset .*${PIN}=" 2>/dev/null); do kill "$p" 2>/dev/null; done
+sleep 1
+
+# on stop: full speed, then release the line (the pin keeps its level)
+trap 'set_fan 100 "service stopped"; sleep 1; kill "$HOLD" 2>/dev/null; exit 0' TERM INT
+
+n=0
+while true; do
+	t="$(hottest)"; c=$((t / 1000))
+	if [ "$MODE" = manual ]; then
+		want=$SPEED
+		[ "$want" -ge 0 ] 2>/dev/null || want=100
+		[ "$c" -ge "$SAFE" ] && want=100
+	else
+		want="$(auto_speed "$c")"
+	fi
+	set_fan "$want" "${c} C"
+	[ $((n % 3)) = 0 ] && measure_rpm
+	n=$((n + 1))
+	sleep 5 &
+	wait $!
+done

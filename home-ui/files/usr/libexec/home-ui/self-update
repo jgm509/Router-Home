@@ -1,0 +1,67 @@
+#!/bin/sh
+# Install a Router Home update from a home-ui.tar.gz archive.
+# Usage: self-update /tmp/home-ui-update.tar.gz
+# Prints one JSON line. Settings in /etc/config are kept.
+
+umask 022	# rpcd may run with a strict umask; the web server needs world-readable files
+ARCHIVE="$1"
+WORK=/tmp/home-ui-update
+R="${HOME_UI_ROOT:-}"	# install root (empty = the real system; set only for testing)
+fail() { rm -rf "$WORK" "$ARCHIVE"; printf '{"error":"%s"}\n' "$1"; exit 0; }
+
+[ -s "$ARCHIVE" ] || fail "No update file was uploaded."
+
+# accept .tar.gz / .tgz (gzip) and plain .tar
+Z=z
+LIST="$(tar tzf "$ARCHIVE" 2>/dev/null)" || { Z=; LIST="$(tar tf "$ARCHIVE" 2>/dev/null)"; } || fail "This file is not a tar archive."
+[ -n "$LIST" ] || fail "This file is not a tar archive."
+
+# every entry must live under home-ui/ and must not climb out of it
+echo "$LIST" | grep -qv '^home-ui/' && fail "This archive is not a Router Home update (unexpected files)."
+echo "$LIST" | grep -q '\.\./' && fail "This archive contains unsafe paths."
+echo "$LIST" | grep -q '^home-ui/files/www/home/index.html$' || fail "This archive is not a Router Home update (no web app inside)."
+echo "$LIST" | grep -q '^home-ui/files/usr/libexec/rpcd/home-ui$' || fail "This archive is not a Router Home update (no backend inside)."
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+tar x${Z}f "$ARCHIVE" -C "$WORK" 2>/dev/null || fail "The archive could not be unpacked (not enough space?)."
+SRC="$WORK/home-ui/files"
+
+# no links, devices or other surprises
+[ -z "$(find "$SRC" ! -type f ! -type d 2>/dev/null)" ] || fail "This archive contains links or special files."
+
+OLD="$(cat "$R/usr/share/home-ui/version" 2>/dev/null || echo unknown)"
+NEW="$(cat "$SRC/usr/share/home-ui/version" 2>/dev/null || echo unknown)"
+
+# keep existing settings: only add config files that don't exist yet
+if [ -d "$SRC/etc/config" ]; then
+	for f in "$SRC"/etc/config/*; do
+		[ -e "$R/etc/config/${f##*/}" ] || cp "$f" "$R/etc/config/"
+	done
+	rm -rf "$SRC/etc/config"
+fi
+
+# remove files of the old web app that the new one no longer ships
+rm -rf "$R/www/home.old"; [ -d "$R/www/home" ] && mv "$R/www/home" "$R/www/home.old"
+cp -r "$SRC"/* "$R/" || { [ -d "$R/www/home.old" ] && rm -rf "$R/www/home" && mv "$R/www/home.old" "$R/www/home"; fail "Copying the files failed (not enough space?)."; }
+rm -rf "$R/www/home.old"
+
+# make sure the web server can read everything and directories can be entered,
+# whatever permissions the archive or the umask produced
+( cd "$SRC" && find . -type d ) | while read -r d; do [ -d "$R/$d" ] && chmod a+rx "$R/$d"; done
+( cd "$SRC" && find . -type f ) | while read -r f; do [ -f "$R/$f" ] && chmod a+r "$R/$f"; done
+
+for f in /usr/libexec/rpcd/home-ui /usr/libexec/home-ui/esim-job /usr/libexec/home-ui/self-update /usr/libexec/home-ui/fullbackup /usr/libexec/home-ui/restore-finish /usr/libexec/home-ui/addon /usr/sbin/home-ui-fan /usr/sbin/home-ui-fan-gpio /usr/sbin/home-ui-light /etc/init.d/home-ui-fan /etc/init.d/home-ui-light; do
+	[ -f "$R$f" ] && chmod 755 "$R$f"
+done
+[ -z "$R" ] && [ -x /etc/init.d/home-ui-fan ] && /etc/init.d/home-ui-fan enable >/dev/null 2>&1
+# add-ons made for this router model (for example its fan or light)
+[ -z "$R" ] && [ -x /usr/libexec/home-ui/addon ] && /usr/libexec/home-ui/addon autoinstall
+
+rm -rf "$WORK" "$ARCHIVE"
+[ -z "$R" ] && logger -t home-ui "updated $OLD -> $NEW"
+
+# reload rpcd (new backend + permissions) after this reply has been sent;
+# SIGHUP keeps login sessions
+[ -z "$R" ] && ( sleep 2; kill -HUP "$(pidof rpcd)" 2>/dev/null || /etc/init.d/rpcd restart ) >/dev/null 2>&1 </dev/null &
+
+printf '{"ok":true,"old":"%s","new":"%s"}\n' "$OLD" "$NEW"

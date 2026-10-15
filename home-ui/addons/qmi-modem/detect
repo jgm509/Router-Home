@@ -1,0 +1,5 @@
+#!/bin/sh
+# active only with a QMI modem and no ModemManager
+[ -n "$(uci -q show network | grep "\.proto='qmi'")" ] || exit 1
+command -v uqmi >/dev/null || exit 1
+exit 0

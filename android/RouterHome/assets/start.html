@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cut">
+<meta name="color-scheme" content="light dark">
+<title>Router Home</title>
+<style>
+:root { --bg: #eef1f4; --surface: #fff; --ink: #14202c; --muted: #5a6876; --line: #d8dfe6; --accent: #2f6df6; --accent-ink: #fff; --warn: #c98a06; --c: #2f6df6; }
+@media (prefers-color-scheme: dark) {
+	:root { --bg: #0c1520; --surface: #142130; --ink: #e6edf4; --muted: #8d9cab; --line: #23344a; --accent: #5b8eff; --accent-ink: #06101c; --warn: #f0b429; --c: #4d86ff; }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+main { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
+.box { width: 100%; max-width: 380px; }
+.lamp { width: 72px; height: 72px; border-radius: 50%; margin: 0 0 24px;
+	background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--c) 55%, white) 0 18%, var(--c) 46%, color-mix(in srgb, var(--c) 70%, black) 100%);
+	box-shadow: 0 0 0 9px color-mix(in srgb, var(--c) 14%, transparent), 0 0 42px 6px color-mix(in srgb, var(--c) 42%, transparent); }
+.lamp.wait { animation: breathe 2.2s ease-in-out infinite; }
+.lamp.warn { --c: var(--warn); }
+@keyframes breathe { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .lamp.wait { animation: none; } }
+h1 { font-size: 27px; line-height: 1.15; letter-spacing: -.02em; margin: 0 0 8px; font-weight: 720; }
+p { color: var(--muted); margin: 0 0 20px; }
+label { display: block; background: var(--surface); border-radius: 14px; padding: 10px 16px; }
+label span { display: block; font-size: 13px; color: var(--muted); font-weight: 560; margin-bottom: 4px; }
+input { width: 100%; border: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; padding: 4px 0; outline: none; }
+.btn { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; border: 0; border-radius: 12px; margin-top: 12px;
+	background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 650; }
+.btn.secondary { background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.hint { font-size: 13.5px; margin-top: 14px; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+	<div class="box">
+		<div class="lamp wait" id="lamp"></div>
+		<h1 id="title">Connecting to your router…</h1>
+		<p id="text">Opening Router Home.</p>
+		<div id="form" hidden>
+			<label><span>Router address</span><input id="addr" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="192.168.1.1"></label>
+			<button class="btn" id="go" type="button">Connect</button>
+			<button class="btn secondary" id="edit" type="button" hidden>Change address</button>
+			<p class="hint" id="hint">Make sure your phone is on the router's WiFi or cable network.</p>
+		</div>
+	</div>
+</main>
+<script>
+'use strict';
+const KEY = 'router-address';
+const $ = id => document.getElementById(id);
+let addr = '';
+try { addr = localStorage.getItem(KEY) || ''; } catch (e) {}
+
+function clean(v) {
+	v = (v || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+	return v;
+}
+function open(a) {
+	a = clean(a) || '192.168.1.1';
+	try { localStorage.setItem(KEY, a); } catch (e) {}
+	$('lamp').className = 'lamp wait';
+	$('title').textContent = 'Connecting to your router…';
+	$('text').textContent = 'Opening ' + a + '.';
+	$('form').hidden = true;
+	location.href = 'http://' + a + '/home/';
+}
+function showForm(offline) {
+	$('form').hidden = false;
+	$('addr').value = addr || '192.168.1.1';
+	if (offline) {
+		$('lamp').className = 'lamp warn';
+		$('title').textContent = "Can't reach your router";
+		$('text').textContent = 'No answer from ' + (addr || '192.168.1.1') + '.';
+		$('go').textContent = 'Try again';
+		$('edit').hidden = false;
+		$('addr').parentNode.hidden = true;
+	} else {
+		$('lamp').className = 'lamp';
+		$('title').textContent = 'Where is your router?';
+		$('text').textContent = 'Enter the address you use to open its settings.';
+		$('go').textContent = 'Connect';
+		$('edit').hidden = true;
+		$('addr').parentNode.hidden = false;
+		$('addr').focus();
+	}
+}
+$('go').onclick = () => open($('addr').parentNode.hidden ? addr : $('addr').value);
+$('edit').onclick = () => showForm(false);
+$('addr').onkeydown = e => { if (e.key === 'Enter') open($('addr').value); };
+
+if (location.hash === '#offline') showForm(true);
+else if (location.hash === '#setup') showForm(false);
+else open(addr || '192.168.1.1');
+</script>
+</body>
+</html>

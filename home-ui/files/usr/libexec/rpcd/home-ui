@@ -1,0 +1,632 @@
+#!/bin/sh
+# rpcd plugin for the Home web interface (/www/home).
+# Everything here needs a logged-in session (see acl.d/home-ui.json).
+
+. /usr/share/libubox/jshn.sh
+. /usr/share/home-ui/addons.sh
+. /usr/share/home-ui/light.sh
+
+RUN=/tmp/home-ui
+JOBS=/usr/libexec/home-ui
+mkdir -p "$RUN"
+
+board() { cat /tmp/sysinfo/board_name 2>/dev/null; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+lpac_bin() {
+	[ -x /usr/lib/lpac ] && { echo /usr/lib/lpac; return; }
+	command -v lpac 2>/dev/null
+}
+
+# who drives the status light: an add-on, an older light script that is
+# already installed, or Router Home's own light service (any router)
+led_kind() {
+	addon_for led >/dev/null && { echo addon; return; }
+	[ -x /usr/bin/cbe-led ] && [ -x /etc/init.d/cbe-led ] && { echo cbe; return; }
+	[ -x /usr/sbin/sbe-led-status ] && [ -x /etc/init.d/sbe-led ] && { echo sbe; return; }
+	[ -x /usr/sbin/status-led ] && [ -x /etc/init.d/status-led ] && { echo status; return; }
+	[ -n "$(light_ok)$(light_bad)" ] && echo generic
+}
+css_color() {
+	case "$1" in red) echo '#ff4d55' ;; amber|orange|yellow) echo '#f0b429' ;; green) echo '#2fbf71' ;; white) echo '#f2f5f8' ;; *) echo '#3b7cff' ;; esac
+}
+
+uplink_dev() {
+	ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1
+}
+
+is_modem_dev() {
+	case "$1" in wwan*|mhi_*|wwp*|usb*|rmnet*) return 0 ;; esac
+	return 1
+}
+
+sbe_led() {	# $1 = blue|red|green|off
+	local c d
+	for c in blue red green; do
+		for d in /sys/class/leds/$c:status /sys/class/leds/*$c*status*; do
+			[ -d "$d" ] || continue
+			echo none > "$d/trigger" 2>/dev/null
+			if [ "$1" = "$c" ]; then echo 1 > "$d/brightness"; else echo 0 > "$d/brightness"; fi
+			break
+		done
+	done
+}
+
+job_state() {	# $1 = job name
+	local f="$RUN/$1.json"
+	if [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; then
+		cat "$RUN/$1.progress" 2>/dev/null || echo '{"state":"running"}'
+	elif [ -f "$f" ]; then
+		cat "$f"
+	else
+		echo '{"state":"idle"}'
+	fi
+}
+
+job_start() {	# $1 = job name, rest = command
+	local name="$1"; shift
+	if [ -f "$RUN/$name.pid" ] && kill -0 "$(cat "$RUN/$name.pid")" 2>/dev/null; then
+		echo '{"error":"busy"}'
+		return
+	fi
+	rm -f "$RUN/$name.json" "$RUN/$name.progress"
+	if command -v setsid >/dev/null 2>&1; then
+		( setsid "$@" >/dev/null 2>&1 </dev/null & echo $! > "$RUN/$name.pid" )
+	else
+		( "$@" >/dev/null 2>&1 </dev/null & echo $! > "$RUN/$name.pid" )
+	fi
+	echo '{"started":true}'
+}
+
+case "$1" in
+list)
+	cat <<-'EOF'
+	{
+		"info": {},
+		"online": {},
+		"led_test": { "color": "str" },
+		"led_set": { "enabled": true, "brightness": 96 },
+		"modem_status": {},
+		"modem_list": {},
+		"esim": { "action": "str", "iccid": "str", "code": "str", "confirm": "str", "name": "str" },
+		"esim_status": {},
+		"tailscale_status": {},
+		"tailscale": { "action": "str", "routes": "str", "exit_node": true },
+		"wg_keys": { "private": "str" },
+		"wg_status": {},
+		"flush_device": { "ip": "str" },
+		"neigh": {},
+		"log": { "lines": 200 },
+		"restart_service": { "name": "str" },
+		"fan_status": {},
+		"wifi_info": {},
+		"self_update": {},
+		"full_backup": { "action": "str" },
+		"restore_status": {},
+		"restore_dismiss": {},
+		"led_info": {},
+		"addon_list": {},
+		"addon_install": { "catalog": "str" },
+		"addon_remove": { "id": "str" },
+		"wifi_scan": { "radio": "str" },
+		"data_usage": { "period": "str" },
+		"fan_set": { "mode": "str", "speed": 50 }
+	}
+	EOF
+	;;
+call)
+	read -r input
+	[ -n "$input" ] || input='{}'
+	json_load "$input"
+
+	case "$2" in
+	info)
+		json_init
+		json_add_string board "$(board)"
+		json_add_string hostname "$(cat /proc/sys/kernel/hostname)"
+		json_add_string led "$(led_kind)"
+		json_add_boolean modem "$( (addon_for modem >/dev/null || (have mmcli && [ -n "$(ls /sys/bus/mhi/devices 2>/dev/null)$(mmcli -L 2>/dev/null | grep -o /Modem/)" ])) && echo 1 || echo 0)"
+		json_add_boolean modem_addon "$(addon_for modem >/dev/null && echo 1 || echo 0)"
+		json_add_boolean lpac "$([ -n "$(lpac_bin)" ] && echo 1 || echo 0)"
+		json_add_boolean tailscale "$(have tailscale && echo 1 || echo 0)"
+		json_add_boolean wireguard "$(have wg && echo 1 || echo 0)"
+		json_add_boolean protonvpn "$([ -f /usr/share/rpcd/ucode/protonvpn.uc ] && echo 1 || echo 0)"
+		json_add_boolean protonvpn_login "$([ -f /www/luci-static/resources/view/protonvpn/srp.js ] && echo 1 || echo 0)"
+		json_add_boolean modemmanager "$([ -x /etc/init.d/modemmanager ] && echo 1 || echo 0)"
+		json_add_boolean doh "$([ -x /etc/init.d/https-dns-proxy ] && echo 1 || echo 0)"
+		json_add_boolean luci "$([ -d /www/luci-static ] && echo 1 || echo 0)"
+		json_add_string version "$(cat /usr/share/home-ui/version 2>/dev/null)"
+		json_dump
+		;;
+
+	online)
+		dev=""
+		[ -n "$(ip route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ] && dev="$(uplink_dev)"
+		ok=0; ms=""
+		if [ -n "$dev" ]; then
+			for h in 1.1.1.1 8.8.8.8; do
+				out="$(ping -c 1 -W 2 "$h" 2>/dev/null)" && {
+					ok=1
+					ms="$(echo "$out" | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -n1)"
+					break
+				}
+			done
+		fi
+		json_init
+		json_add_boolean online "$ok"
+		json_add_string device "$dev"
+		json_add_boolean via_modem "$(is_modem_dev "$dev" && echo 1 || echo 0)"
+		[ -n "$ms" ] && json_add_string latency "$ms"
+		json_dump
+		;;
+
+	led_info)
+		kind="$(led_kind)"
+		case "$kind" in
+		addon)
+			addon_call "$(addon_for led)" led info | sed 's/^{/{"kind":"addon",/'
+			;;
+		cbe)
+			printf '{"kind":"cbe","enabled":%s,"brightness":%s,"description":"Blue: WAN · white: 5G · yellow: no internet · red: offline","colors":[{"id":"blue","label":"WAN","css":"#3b7cff"},{"id":"white","label":"5G","css":"#f2f5f8"},{"id":"yellow","label":"No internet","css":"#f0b429"},{"id":"red","label":"Offline","css":"#ff4d55"},{"id":"breath","label":"Starting","css":"linear-gradient(#fff,#8899aa)"}]}\n' \
+				"$([ "$(uci -q get cbe-led.main.enabled)" = 0 ] && echo false || echo true)" "$(uci -q get cbe-led.main.brightness || echo 96)"
+			;;
+		sbe|status)
+			printf '{"kind":"%s","enabled":%s,"brightness":null,"description":"Blue: online · red: no internet","colors":[{"id":"blue","label":"Online","css":"#3b7cff"},{"id":"red","label":"No internet","css":"#ff4d55"}]}\n' \
+				"$kind" "$([ "$(uci -q get $kind-led.main.enabled)" = 0 ] && echo false || echo true)"
+			;;
+		generic)
+			ok="$(light_ok)"; bad="$(light_bad)"
+			oc="$(_light_color "$ok")"; bc="$(_light_color "$bad")"
+			[ "$oc" = other ] && oc=green
+			if [ -n "$bad" ]; then
+				desc="$oc: online · $bc: no internet"
+				cols="{\"id\":\"ok\",\"label\":\"Online\",\"css\":\"$(css_color "$oc")\"},{\"id\":\"bad\",\"label\":\"No internet\",\"css\":\"$(css_color "$bc")\"}"
+			else
+				desc="$oc: online · blinking: no internet"
+				cols="{\"id\":\"ok\",\"label\":\"Online\",\"css\":\"$(css_color "$oc")\"},{\"id\":\"bad\",\"label\":\"Blinking: no internet\",\"css\":\"repeating-linear-gradient(90deg,$(css_color "$oc") 0 6px,transparent 6px 12px)\"}"
+			fi
+			en=false; [ "$(uci -q get home-ui-light.main.enabled)" = 1 ] && en=true
+			desc="$(echo "$desc" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+			printf '{"kind":"generic","enabled":%s,"brightness":null,"description":"%s","leds":"%s","colors":[%s]}\n' "$en" "$desc" "${ok##*/}${bad:+, ${bad##*/}}" "$cols"
+			;;
+		*) echo '{"kind":"none","error":"no status light found on this router"}' ;;
+		esac
+		;;
+
+	led_test)
+		json_get_var color color
+		case "$(led_kind)" in
+		addon)
+			addon_call "$(addon_for led)" led test "{\"color\":\"$(echo "$color" | tr -cd 'a-z0-9_-')\"}"; exit 0
+			;;
+		cbe)
+			case "$color" in white|red|green|blue|yellow|cyan|magenta|breath|off) ;; *) color=white ;; esac
+			/etc/init.d/cbe-led stop >/dev/null 2>&1
+			br="$(uci -q get cbe-led.main.brightness)"
+			/usr/bin/cbe-led "$color" "${br:-96}" >/dev/null 2>&1
+			( sleep 4; /etc/init.d/cbe-led start >/dev/null 2>&1 ) >/dev/null 2>&1 </dev/null &
+			;;
+		sbe|status)
+			kind="$(led_kind)"
+			case "$color" in blue|red|green|off) ;; *) color=blue ;; esac
+			/etc/init.d/$kind-led stop >/dev/null 2>&1
+			sbe_led "$color"
+			( sleep 4; /etc/init.d/$kind-led start >/dev/null 2>&1 ) >/dev/null 2>&1 </dev/null &
+			;;
+		generic)
+			ok="$(light_ok)"; bad="$(light_bad)"
+			/etc/init.d/home-ui-light stop >/dev/null 2>&1
+			if [ "$color" = bad ]; then
+				if [ -n "$bad" ]; then light_set "$ok" off; light_set "$bad" on; else light_set "$ok" blink; fi
+			else
+				light_set "$bad" off; light_set "$ok" on
+			fi
+			# afterwards: our service if it is on, otherwise OpenWrt's normal "on"
+			( sleep 4
+			  if [ "$(uci -q get home-ui-light.main.enabled)" = 1 ]; then /etc/init.d/home-ui-light start
+			  else light_set "$bad" off; light_set "$ok" on; fi ) >/dev/null 2>&1 </dev/null &
+			;;
+		*) echo '{"error":"no LED support on this router"}'; exit 0 ;;
+		esac
+		echo '{"ok":true}'
+		;;
+
+	led_set)
+		json_get_var enabled enabled
+		json_get_var brightness brightness
+		kind="$(led_kind)"
+		[ -n "$kind" ] || { echo '{"error":"no LED support on this router"}'; exit 0; }
+		[ "$enabled" = 1 ] || enabled=0
+		case "$kind" in
+		addon)
+			b=null; [ "$brightness" -ge 0 ] 2>/dev/null && b="$brightness"
+			addon_call "$(addon_for led)" led set "{\"enabled\":$([ "$enabled" = 1 ] && echo true || echo false),\"brightness\":$b}"; exit 0
+			;;
+		generic)
+			uci -q set home-ui-light.main=light
+			uci -q set home-ui-light.main.enabled="$enabled"
+			uci -q commit home-ui-light
+			if [ "$enabled" = 1 ]; then
+				/etc/init.d/home-ui-light enable; /etc/init.d/home-ui-light restart
+			else
+				/etc/init.d/home-ui-light stop; /etc/init.d/home-ui-light disable
+				# back to OpenWrt's normal: status LED on
+				light_set "$(light_bad)" off; light_set "$(light_ok)" on
+			fi >/dev/null 2>&1
+			;;
+		*)
+			uci -q set "$kind-led.main.enabled=$enabled"
+			if [ "$kind" = cbe ] && [ -n "$brightness" ]; then
+				[ "$brightness" -ge 1 ] 2>/dev/null && [ "$brightness" -le 255 ] && uci -q set "cbe-led.main.brightness=$brightness"
+			fi
+			uci -q commit "$kind-led"
+			/etc/init.d/$kind-led restart >/dev/null 2>&1
+			if [ "$enabled" = 0 ]; then
+				[ "$kind" = cbe ] && /usr/bin/cbe-led off >/dev/null 2>&1
+				[ "$kind" = sbe ] || [ "$kind" = status ] && sbe_led off
+			fi
+			;;
+		esac
+		echo '{"ok":true}'
+		;;
+
+	addon_list)
+		json_init
+		json_add_string board "$(board)"
+		json_add_array addons
+		for d in "$ADDONS_DIR"/*/; do
+			d="${d%/}"; [ -f "$d/addon.json" ] || continue
+			json_add_object
+			json_add_string id "$(basename "$d")"
+			json_add_string name "$(jsonfilter -i "$d/addon.json" -e '@.name' 2>/dev/null)"
+			json_add_string version "$(jsonfilter -i "$d/addon.json" -e '@.version' 2>/dev/null)"
+			json_add_string description "$(jsonfilter -i "$d/addon.json" -e '@.description' 2>/dev/null)"
+			json_add_string author "$(jsonfilter -i "$d/addon.json" -e '@.author' 2>/dev/null)"
+			json_add_string boards "$(jsonfilter -i "$d/addon.json" -e '@.boards[*]' 2>/dev/null | tr '\n' ' ')"
+			p=""; for c in led fan modem; do [ "$(jsonfilter -i "$d/addon.json" -e "@.provides.$c" 2>/dev/null)" = true ] && p="$p $c"; done
+			[ -n "$(jsonfilter -i "$d/addon.json" -e '@.fan_gpio.pin' 2>/dev/null)" ] && p="$p fan"
+			json_add_string provides "${p# }"
+			json_add_boolean active "$(addon_applies "$d" && echo 1 || echo 0)"
+			json_close_object
+		done
+		json_close_array
+		json_add_array catalog
+		for f in /usr/share/home-ui/catalog/*.tar.gz; do
+			[ -f "$f" ] || continue
+			id="$(basename "$f" .tar.gz)"
+			j="$(tar -xzOf "$f" "$id/addon.json" 2>/dev/null)"
+			[ -n "$j" ] || continue
+			bs="$(echo "$j" | jsonfilter -e '@.boards[*]' 2>/dev/null | tr '\n' ' ')"
+			json_add_object
+			json_add_string id "$id"
+			json_add_string name "$(echo "$j" | jsonfilter -e '@.name' 2>/dev/null)"
+			json_add_string version "$(echo "$j" | jsonfilter -e '@.version' 2>/dev/null)"
+			json_add_string description "$(echo "$j" | jsonfilter -e '@.description' 2>/dev/null)"
+			json_add_string boards "$bs"
+			json_add_boolean fits "$(case " $bs " in *" $(board) "*|*" * "*) echo 1 ;; *) echo 0 ;; esac)"
+			json_add_boolean installed "$([ -d "$ADDONS_DIR/$id" ] && echo 1 || echo 0)"
+			json_close_object
+		done
+		json_close_array
+		json_dump
+		;;
+
+	addon_install)
+		json_get_var cat catalog
+		if [ -n "$cat" ]; then
+			case "$cat" in *[!a-z0-9._-]*) echo '{"error":"Unknown add-on"}'; exit 0 ;; esac
+			[ -f "/usr/share/home-ui/catalog/$cat.tar.gz" ] || { echo '{"error":"Unknown add-on"}'; exit 0; }
+			"$JOBS/addon" install "/usr/share/home-ui/catalog/$cat.tar.gz"
+		else
+			"$JOBS/addon" install /tmp/home-ui-addon.tar.gz
+			rm -f /tmp/home-ui-addon.tar.gz
+		fi
+		;;
+
+	addon_remove)
+		json_get_var id id
+		"$JOBS/addon" remove "$id"
+		;;
+
+	modem_status)
+		a="$(addon_for modem)" && { addon_call "$a" modem status; exit 0; }
+		have mmcli || { echo '{"error":"ModemManager is not installed"}'; exit 0; }
+		m="$(mmcli -m any -J 2>/dev/null)"
+		[ -n "$m" ] || { echo '{"error":"no modem found yet (it can take 2 minutes after boot)"}'; exit 0; }
+		s="$(mmcli -m any --signal-get -J 2>/dev/null)"
+		rate="$(echo "$s" | jsonfilter -e '@.modem.signal.refresh.rate' 2>/dev/null)"
+		if [ -z "$s" ] || [ "${rate:-0}" = 0 ]; then
+			mmcli -m any --signal-setup=10 >/dev/null 2>&1
+		fi
+		b=""
+		bp="$(echo "$m" | jsonfilter -e '@.modem.generic.bearers[0]' 2>/dev/null)"
+		[ -n "$bp" ] && b="$(mmcli -b "$bp" -J 2>/dev/null)"
+		printf '{"modem":%s,"signal":%s,"bearer":%s}\n' "$m" "${s:-null}" "${b:-null}"
+		;;
+
+	modem_list)
+		have mmcli || { echo '{"modems":[]}'; exit 0; }
+		json_init
+		json_add_array modems
+		for p in $(mmcli -L -J 2>/dev/null | jsonfilter -e '@["modem-list"][*]'); do
+			j="$(mmcli -m "$p" -J 2>/dev/null)"
+			json_add_object
+			json_add_string path "$p"
+			json_add_string device "$(echo "$j" | jsonfilter -e '@.modem.generic.device')"
+			json_add_string model "$(echo "$j" | jsonfilter -e '@.modem.generic.model')"
+			json_add_string manufacturer "$(echo "$j" | jsonfilter -e '@.modem.generic.manufacturer')"
+			json_close_object
+		done
+		json_close_array
+		json_dump
+		;;
+
+	esim)
+		[ -n "$(lpac_bin)" ] || { echo '{"error":"lpac is not installed"}'; exit 0; }
+		json_get_var action action
+		json_get_var iccid iccid
+		json_get_var code code
+		json_get_var confirm confirm
+		json_get_var name name
+		case "$action" in
+			list|chip) ;;
+			enable|disable|delete) [ -n "$iccid" ] || { echo '{"error":"missing ICCID"}'; exit 0; } ;;
+			nickname) [ -n "$iccid" ] || { echo '{"error":"missing ICCID"}'; exit 0; } ;;
+			download) [ -n "$code" ] || { echo '{"error":"missing activation code"}'; exit 0; } ;;
+			*) echo '{"error":"unknown action"}'; exit 0 ;;
+		esac
+		job_start esim "$JOBS/esim-job" "$action" "$iccid" "$code" "$confirm" "$name"
+		;;
+
+	esim_status)
+		c="$(cat "$RUN/esim-profiles.json" 2>/dev/null)"
+		printf '{"job":%s,"profiles":%s}\n' "$(job_state esim)" "${c:-null}"
+		;;
+
+	tailscale_status)
+		have tailscale || { echo '{"error":"Tailscale is not installed"}'; exit 0; }
+		st="$(tailscale status --json 2>/dev/null)"
+		[ -n "$st" ] || st='{"BackendState":"Stopped"}'
+		prefs="$(tailscale debug prefs 2>/dev/null)"
+		url="$(sed -n 's/.*\(https:\/\/login\.tailscale\.com[^ ]*\).*/\1/p' "$RUN/tailscale-up.log" 2>/dev/null | tail -n1)"
+		printf '{"status":%s,"prefs":%s,"login_url":"%s"}\n' "$st" "${prefs:-null}" "$url"
+		;;
+
+	tailscale)
+		have tailscale || { echo '{"error":"Tailscale is not installed"}'; exit 0; }
+		json_get_var action action
+		json_get_var routes routes
+		json_get_var exit_node exit_node
+		case "$action" in
+		up)
+			/etc/init.d/tailscale enable >/dev/null 2>&1
+			/etc/init.d/tailscale start >/dev/null 2>&1
+			args="--accept-dns=false"
+			[ -n "$routes" ] && args="$args --advertise-routes=$routes"
+			[ "$exit_node" = 1 ] && args="$args --advertise-exit-node"
+			rm -f "$RUN/tailscale-up.log"
+			( tailscale up $args > "$RUN/tailscale-up.log" 2>&1 & ) </dev/null
+			i=0; url=""
+			while [ $i -lt 10 ]; do
+				sleep 1; i=$((i+1))
+				url="$(sed -n 's/.*\(https:\/\/login\.tailscale\.com[^ ]*\).*/\1/p' "$RUN/tailscale-up.log" 2>/dev/null | tail -n1)"
+				[ -n "$url" ] && break
+				tailscale status >/dev/null 2>&1 && break
+			done
+			json_init; json_add_boolean ok 1; json_add_string login_url "$url"; json_dump
+			;;
+		set)
+			tailscale set --advertise-routes="$routes" --advertise-exit-node="$([ "$exit_node" = 1 ] && echo true || echo false)" >/dev/null 2>&1 \
+				&& echo '{"ok":true}' || echo '{"error":"tailscale set failed"}'
+			;;
+		down) tailscale down >/dev/null 2>&1; echo '{"ok":true}' ;;
+		logout) tailscale logout >/dev/null 2>&1; rm -f "$RUN/tailscale-up.log"; echo '{"ok":true}' ;;
+		*) echo '{"error":"unknown action"}' ;;
+		esac
+		;;
+
+	wg_keys)
+		have wg || { echo '{"error":"WireGuard tools are not installed"}'; exit 0; }
+		json_get_var priv private
+		[ -n "$priv" ] || priv="$(wg genkey)"
+		pub="$(echo "$priv" | wg pubkey 2>/dev/null)"
+		[ -n "$pub" ] || { echo '{"error":"invalid private key"}'; exit 0; }
+		json_init; json_add_string private "$priv"; json_add_string public "$pub"; json_dump
+		;;
+
+	wg_status)
+		have wg || { echo '{"dump":""}'; exit 0; }
+		json_init; json_add_string dump "$(wg show all dump 2>/dev/null)"; json_dump
+		;;
+
+	flush_device)
+		# drop open connections so a newly blocked device loses access right away
+		json_get_var ip ip
+		case "$ip" in *[!0-9a-fA-F.:]*|"") echo '{"error":"bad address"}'; exit 0 ;; esac
+		if have conntrack; then
+			conntrack -D -s "$ip" >/dev/null 2>&1
+			conntrack -D -d "$ip" >/dev/null 2>&1
+		else
+			echo f > /proc/net/nf_conntrack 2>/dev/null
+		fi
+		echo '{"ok":true}'
+		;;
+
+	neigh)
+		json_init; json_add_string neigh "$(ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null)"; json_dump
+		;;
+
+	log)
+		json_get_var lines lines
+		[ "$lines" -gt 0 ] 2>/dev/null || lines=200
+		[ "$lines" -le 2000 ] || lines=2000
+		json_init; json_add_string log "$(logread 2>/dev/null | tail -n "$lines")"; json_dump
+		;;
+
+	full_backup)
+		json_get_var action action
+		case "$action" in
+			start) "$JOBS/fullbackup" start ;;
+			snapshot) "$JOBS/fullbackup" snapshot-start ;;
+			*) "$JOBS/fullbackup" status ;;
+		esac
+		;;
+
+	wifi_scan)
+		# scan from an interface that already runs on this radio
+		json_get_var radio radio
+		case "$radio" in ''|*[!a-zA-Z0-9_]*) echo '{"error":"invalid radio"}'; exit 0 ;; esac
+		ifn="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[*].ifname" 2>/dev/null | head -n1)"
+		[ -n "$ifn" ] || { echo '{"error":"Turn on a WiFi network on this band first, so the router can scan with it."}'; exit 0; }
+		r="$(ubus -t 30 call iwinfo scan "{\"device\":\"$ifn\"}" 2>/dev/null)"
+		[ -n "$r" ] && echo "$r" || echo '{"error":"The scan did not work. Try again, or type the network name."}'
+		;;
+
+	data_usage)
+		json_get_var period period
+		case "$period" in ''|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) period="" ;; esac
+		ifs="$(for d in /sys/class/net/*; do
+			n="${d##*/}"; [ "$n" = lo ] && continue
+			printf '{"name":"%s","rx":%s,"tx":%s},' "$n" "$(cat "$d/statistics/rx_bytes" 2>/dev/null || echo 0)" "$(cat "$d/statistics/tx_bytes" 2>/dev/null || echo 0)"
+		done)"
+		up="$(cut -d. -f1 /proc/uptime)"
+		if have nlbw; then
+			per="$(nlbw -c list 2>/dev/null | awk 'BEGIN{printf "["} /^[0-9]{4}-[0-9]{2}-[0-9]{2}/{printf "%s\"%s\"", (n++?",":""), $1} END{printf "]"}')"
+			dev="$(nlbw -c json -g mac ${period:+-t "$period"} 2>/dev/null)"
+			printf '{"nlbw":true,"uptime":%s,"periods":%s,"devices":%s,"ifaces":[%s],"vnstat":%s}\n' "$up" "${per:-[]}" "${dev:-null}" "${ifs%,}" "$( (have vnstat && vnstat --json m 3 2>/dev/null) || echo null)"
+		else
+			printf '{"nlbw":false,"uptime":%s,"ifaces":[%s],"vnstat":%s}\n' "$up" "${ifs%,}" "$( (have vnstat && vnstat --json m 3 2>/dev/null) || echo null)"
+		fi
+		;;
+
+	restore_dismiss)
+		# hide the finished/failed banner (the log stays in /etc/home-ui/restore/log)
+		[ -d /etc/home-ui/restore ] && date > /etc/home-ui/restore/dismissed
+		echo '{"ok":true}'
+		;;
+
+	restore_status)
+		R=/etc/home-ui/restore
+		json_init
+		if [ -f "$R/state" ]; then
+			json_add_string state "$(cat "$R/state")"
+			json_add_string message "$(cat "$R/message" 2>/dev/null)"
+			age=0; [ -f "$R/done" ] && age=$(( $(date +%s) - $(date -r "$R/done" +%s 2>/dev/null || date +%s) ))
+			json_add_int done_age "$age"
+			json_add_boolean dismissed "$([ -f "$R/dismissed" ] && echo 1 || echo 0)"
+			json_add_string log "$(tail -n 40 "$R/log" 2>/dev/null)"
+		else
+			json_add_string state none
+		fi
+		json_dump
+		;;
+
+	self_update)
+		if command -v setsid >/dev/null 2>&1; then
+			setsid "$JOBS/self-update" /tmp/home-ui-update.tar.gz </dev/null 2>/dev/null
+		else
+			"$JOBS/self-update" /tmp/home-ui-update.tar.gz </dev/null 2>/dev/null
+		fi
+		;;
+
+	wifi_info)
+		# radio status from netifd plus per-interface details from nl80211;
+		# both are instant (no firmware statistics requests)
+		json_init
+		for d in /sys/class/net/*; do
+			[ -d "$d/wireless" ] || [ -L "$d/phy80211" ] || continue
+			i="${d##*/}"
+			json_add_string "$i" "$(iw dev "$i" info 2>/dev/null)"
+		done
+		iw_json="$(json_dump)"
+		st="$(ubus call network.wireless status 2>/dev/null)"
+		printf '{"status":%s,"iw":%s}\n' "${st:-null}" "$iw_json"
+		;;
+
+	fan_status)
+		. /usr/share/home-ui/fan-backend.sh
+		a="$(addon_for fan)" && { addon_call "$a" fan status; exit 0; }
+		hw="$(fan_hwmon)"
+		be="$(fan_backend)"
+		json_init
+		json_add_boolean available "$([ "$be" != none ] && echo 1 || echo 0)"
+		if [ "$be" = gpio ]; then
+			if gpioset --help 2>&1 | grep -q -- '--toggle'; then
+				json_add_string kind pwm
+				json_add_boolean soft 1
+			else
+				json_add_string kind onoff
+			fi
+			st="$(cat /tmp/home-ui/fan-state 2>/dev/null)"; [ "$st" -ge 0 ] 2>/dev/null || st=0
+			json_add_int pwm "$(( st * 255 / 100 ))"
+			r="$(cat /tmp/home-ui/fan-rpm 2>/dev/null)"
+			[ -n "$r" ] && [ "$st" -gt 0 ] && json_add_int rpm "$r"
+		else
+			json_add_string kind pwm
+			[ -n "$(fan_gpio)" ] && ! command -v gpioset >/dev/null 2>&1 && json_add_string missing "gpiod-tools"
+		fi
+		json_add_string mode "$(uci -q get fan.main.mode || echo auto)"
+		json_add_int speed "$(uci -q get fan.main.speed || echo 50)"
+		json_add_int safety_temp "$(uci -q get fan.main.safety_temp || echo 85)"
+		[ -n "$hw" ] && json_add_int pwm "$(cat "$hw/pwm1" 2>/dev/null || echo 0)"
+		[ -n "$hw" ] && [ -r "$hw/fan1_input" ] && json_add_int rpm "$(cat "$hw/fan1_input")"
+		json_add_array temps
+		for z in /sys/class/thermal/thermal_zone*; do
+			t="$(cat "$z/temp" 2>/dev/null)" || continue
+			[ -n "$t" ] || continue
+			json_add_object
+			json_add_string name "$(cat "$z/type" 2>/dev/null)"
+			json_add_int temp "$t"
+			json_close_object
+		done
+		for d in /sys/class/hwmon/hwmon*; do
+			n="$(cat "$d/name" 2>/dev/null)"
+			case "$n" in ath1*|mt79*|nvme*|aqr*|qca*) ;; *) continue ;; esac
+			t="$(cat "$d/temp1_input" 2>/dev/null)" || continue
+			[ -n "$t" ] || continue
+			dev="$(basename "$(readlink -f "$d/device")" 2>/dev/null)"
+			json_add_object
+			json_add_string name "$n${dev:+ $dev}"
+			json_add_int temp "$t"
+			json_close_object
+		done
+		json_close_array
+		json_dump
+		;;
+
+	fan_set)
+		json_get_var mode mode
+		json_get_var speed speed
+		case "$mode" in auto|manual) ;; *) echo '{"error":"mode must be auto or manual"}'; exit 0 ;; esac
+		a="$(addon_for fan)" && {
+			[ "$speed" -ge 0 ] 2>/dev/null && [ "$speed" -le 100 ] || speed=50
+			addon_call "$a" fan set "{\"mode\":\"$mode\",\"speed\":$speed}"; exit 0
+		}
+		[ -n "$(uci -q get fan.main)" ] || { touch /etc/config/fan; uci -q set fan.main=fan; }
+		uci -q set fan.main.mode="$mode"
+		if [ -n "$speed" ]; then
+			[ "$speed" -ge 0 ] 2>/dev/null && [ "$speed" -le 100 ] && uci -q set fan.main.speed="$speed"
+		fi
+		uci -q commit fan
+		/etc/init.d/home-ui-fan enable >/dev/null 2>&1
+		/etc/init.d/home-ui-fan restart >/dev/null 2>&1
+		echo '{"ok":true}'
+		;;
+
+	restart_service)
+		json_get_var name name
+		case "$name" in
+			modemmanager|network|firewall|dnsmasq|tailscale|https-dns-proxy|cbe-led|sbe-led|status-led) ;;
+			*) echo '{"error":"not allowed"}'; exit 0 ;;
+		esac
+		[ -x "/etc/init.d/$name" ] || { echo '{"error":"not installed"}'; exit 0; }
+		( /etc/init.d/$name restart >/dev/null 2>&1 & ) </dev/null
+		echo '{"ok":true}'
+		;;
+
+	*)
+		echo '{"error":"unknown method"}'
+		;;
+	esac
+	;;
+esac

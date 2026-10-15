@@ -1,0 +1,185 @@
+{
+	"home-ui": {
+		"description": "Home web interface",
+		"read": {
+			"ubus": {
+				"home-ui": [
+					"info",
+					"online",
+					"neigh",
+					"modem_status",
+					"modem_list",
+					"esim_status",
+					"tailscale_status",
+					"wg_status",
+					"log",
+					"fan_status",
+					"wifi_info",
+					"restore_status",
+					"data_usage",
+					"led_info",
+					"addon_list"
+				],
+				"luci-rpc": [
+					"getHostHints",
+					"getDHCPLeases",
+					"getWirelessDevices",
+					"getNetworkDevices",
+					"getBoardJSON"
+				],
+				"luci": [
+					"getTimezones",
+					"getVersion",
+					"getInitList"
+				],
+				"network.interface": [
+					"dump"
+				],
+				"network.device": [
+					"status"
+				],
+				"network.wireless": [
+					"status"
+				],
+				"iwinfo": [
+					"assoclist",
+					"freqlist",
+					"info",
+					"txpowerlist"
+				],
+				"system": [
+					"board",
+					"info"
+				],
+				"uci": [
+					"get",
+					"changes"
+				],
+				"file": [
+					"exec",
+					"stat",
+					"read"
+				],
+				"protonvpn": [
+					"status",
+					"instances",
+					"session_state",
+					"locations",
+					"servers",
+					"external_ip",
+					"refresh_status",
+					"apply_status",
+					"account"
+				]
+			},
+			"uci": [
+				"*"
+			],
+			"file": {
+				"/tmp/firmware.bin": [
+					"read"
+				],
+				"/tmp/backup.tar.gz": [
+					"read"
+				],
+				"/sbin/sysupgrade *": [
+					"exec"
+				],
+				"/sbin/firstboot *": [
+					"exec"
+				],
+				"/sbin/ifup *": [
+					"exec"
+				],
+				"/sbin/ifdown *": [
+					"exec"
+				],
+				"/tmp/home-ui-update.tar.gz": [
+					"read"
+				],
+				"/tmp/home-ui-addon.tar.gz": [
+					"read"
+				]
+			},
+			"cgi-io": [
+				"backup",
+				"download"
+			]
+		},
+		"write": {
+			"ubus": {
+				"home-ui": [
+					"led_test",
+					"led_set",
+					"esim",
+					"tailscale",
+					"wg_keys",
+					"flush_device",
+					"restart_service",
+					"fan_set",
+					"self_update",
+					"full_backup",
+					"wifi_scan",
+					"restore_dismiss",
+					"addon_install",
+					"addon_remove"
+				],
+				"luci": [
+					"setPassword",
+					"setLocaltime"
+				],
+				"system": [
+					"reboot",
+					"validate_firmware_image"
+				],
+				"uci": [
+					"add",
+					"set",
+					"delete",
+					"rename",
+					"order",
+					"apply",
+					"confirm",
+					"rollback",
+					"revert",
+					"commit"
+				],
+				"file": [
+					"remove",
+					"write"
+				],
+				"protonvpn": [
+					"auth_info",
+					"auth_finish",
+					"set_totp",
+					"logout",
+					"apply_start",
+					"disconnect",
+					"refresh_locations",
+					"rotate_now",
+					"certificate_renew"
+				]
+			},
+			"uci": [
+				"*"
+			],
+			"file": {
+				"/tmp/firmware.bin": [
+					"write"
+				],
+				"/tmp/backup.tar.gz": [
+					"write"
+				],
+				"/tmp/home-ui-update.tar.gz": [
+					"write"
+				],
+				"/tmp/home-ui-addon.tar.gz": [
+					"write"
+				]
+			},
+			"cgi-io": [
+				"upload"
+			]
+		}
+	}
+}

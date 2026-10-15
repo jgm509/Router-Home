@@ -1,0 +1,122 @@
+#!/bin/sh
+# Fan control for routers with a Linux fan driver (pwm-fan or gpio-fan).
+#   mode auto   : the kernel's thermal control drives the fan (default)
+#   mode manual : the fan runs at a fixed speed; if the chip gets too hot
+#                 it goes to full speed until it cools down again.
+# The kernel's critical shutdown always stays active.
+
+. /lib/functions.sh
+. /usr/share/home-ui/fan-backend.sh
+
+# fan on a plain GPIO: software PWM controller; add-on fans run their own
+case "$(fan_backend)" in
+	gpio) [ "$1" != restore ] && exec /usr/sbin/home-ui-fan-gpio; exit 0 ;;
+	addon|none) exit 0 ;;
+esac
+
+find_hwmon() { fan_hwmon; }
+
+find_cdev() {
+	local d
+	for d in /sys/class/thermal/cooling_device*; do
+		case "$(cat "$d/type" 2>/dev/null)" in pwm-fan|gpio-fan|gpio_fan) echo "$d"; return ;; esac
+	done
+}
+
+# thermal zone that uses the fan as a cooling device
+find_zone() {
+	local z l
+	for z in /sys/class/thermal/thermal_zone*; do
+		for l in "$z"/cdev*; do
+			[ -L "$l" ] || continue
+			[ "$(readlink -f "$l")" = "$(readlink -f "$1")" ] && { echo "$z"; return; }
+		done
+	done
+	# fallback: the hottest zone
+	local best= bt=-999999 t
+	for z in /sys/class/thermal/thermal_zone*; do
+		t="$(cat "$z/temp" 2>/dev/null)" || continue
+		[ "$t" -gt "$bt" ] 2>/dev/null && { bt=$t; best=$z; }
+	done
+	echo "$best"
+}
+
+HWMON="$(find_hwmon)"
+CDEV="$(find_cdev)"
+[ -n "$HWMON" ] || { logger -t fan "no fan driver found"; exit 0; }
+ZONE="$(find_zone "$CDEV")"
+STATE=/tmp/home-ui/fan-policy
+mkdir -p /tmp/home-ui
+
+config_load fan
+config_get MODE main mode auto
+config_get SPEED main speed 50
+config_get SAFE main safety_temp 85
+
+# gpio-fan only accepts pwm1 writes in manual mode (pwm1_enable = 1)
+set_pwm() {
+	[ -w "$HWMON/pwm1_enable" ] && [ "$(cat "$HWMON/pwm1_enable" 2>/dev/null)" != 1 ] && echo 1 > "$HWMON/pwm1_enable" 2>/dev/null
+	echo "$1" > "$HWMON/pwm1" 2>/dev/null
+}
+
+# fan level the kernel would pick right now: one step per active trip
+# point the temperature is above (trip points come from the device tree)
+auto_level() {
+	local t n=0 i tt ty max
+	t="$(cat "$ZONE/temp" 2>/dev/null)" || { echo 0; return; }
+	for i in "$ZONE"/trip_point_*_type; do
+		ty="$(cat "$i")"; [ "$ty" = active ] || continue
+		tt="$(cat "${i%_type}_temp")"
+		[ "$t" -ge "$tt" ] 2>/dev/null && n=$((n + 1))
+	done
+	n=$((n - 1)); [ $n -lt 0 ] && n=0
+	max="$(cat "$CDEV/max_state" 2>/dev/null || echo 3)"
+	[ $n -gt "$max" ] && n=$max
+	echo $n
+}
+
+restore_auto() {
+	if [ -n "$ZONE" ] && [ -f "$STATE" ]; then
+		cat "$STATE" > "$ZONE/policy" 2>/dev/null
+		rm -f "$STATE"
+	fi
+	# hand the fan back at the level that matches the current temperature;
+	# from here the kernel changes it as trip points are crossed
+	if [ -n "$CDEV" ] && [ -n "$ZONE" ]; then
+		echo "$(auto_level)" > "$CDEV/cur_state" 2>/dev/null
+	fi
+}
+
+if [ "$1" = restore ] || [ "$MODE" != manual ]; then
+	restore_auto
+	logger -t fan "automatic"
+	exit 0
+fi
+
+# manual: take the zone away from the kernel governor when possible
+if [ -n "$ZONE" ] && grep -qw user_space "$ZONE/available_policies" 2>/dev/null; then
+	[ -f "$STATE" ] || cat "$ZONE/policy" > "$STATE"
+	echo user_space > "$ZONE/policy"
+fi
+
+trap 'restore_auto; exit 0' TERM INT
+
+[ "$SPEED" -ge 0 ] 2>/dev/null && [ "$SPEED" -le 100 ] || SPEED=50
+PWM=$(( SPEED * 255 / 100 ))
+SAFE_MC=$(( SAFE * 1000 ))
+hot=0
+logger -t fan "manual ${SPEED}% (safety ${SAFE} C)"
+
+while true; do
+	t="$(cat "$ZONE/temp" 2>/dev/null)"
+	if [ -n "$t" ] && [ "$t" -ge "$SAFE_MC" ]; then
+		[ $hot = 1 ] || logger -t fan "too hot ($((t / 1000)) C), full speed"
+		hot=1
+	elif [ $hot = 1 ] && [ -n "$t" ] && [ "$t" -lt $(( SAFE_MC - 10000 )) ]; then
+		logger -t fan "cooled down, back to ${SPEED}%"
+		hot=0
+	fi
+	if [ $hot = 1 ]; then set_pwm 255; else set_pwm "$PWM"; fi
+	sleep 3 &
+	wait $!
+done

@@ -1,0 +1,11 @@
+config light 'main'
+	# show internet status on the router's status light (set in Router Home)
+	option enabled '0'
+	# hosts used to test internet access
+	list check_host '1.1.1.1'
+	list check_host '8.8.8.8'
+	# seconds between checks
+	option interval '15'
+	# LEDs to use, by their name in /sys/class/leds; empty = found automatically
+	option ok_led ''
+	option bad_led ''

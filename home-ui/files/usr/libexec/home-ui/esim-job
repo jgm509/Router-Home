@@ -1,0 +1,98 @@
+#!/bin/sh
+# Background eSIM job for the Home interface.
+# Usage: esim-job <list|chip|enable|disable|delete|nickname|download> [iccid] [code] [confirm] [name]
+# ModemManager is stopped while lpac talks to the eSIM (QMI over QRTR), then started again.
+
+ACTION="$1"; ICCID="$2"; CODE="$3"; CONFIRM="$4"; NAME="$5"
+RUN=/tmp/home-ui
+OUT="$RUN/esim.json"
+PROG="$RUN/esim.progress"
+CACHE="$RUN/esim-profiles.json"
+
+LPAC=/usr/lib/lpac
+[ -x "$LPAC" ] || LPAC="$(command -v lpac)"
+export LPAC_APDU="${LPAC_APDU:-qmi_qrtr}"
+
+progress() { printf '{"state":"running","action":"%s","step":"%s"}\n' "$ACTION" "$1" > "$PROG"; }
+
+finish() {	# $1 = state, $2 = lpa json line or error text
+	if [ "$1" = done ]; then
+		printf '{"state":"done","action":"%s","result":%s}\n' "$ACTION" "$2" > "$OUT"
+	else
+		msg="$(printf '%s' "$2" | tr '"\\\n' "'/ ")"
+		printf '{"state":"error","action":"%s","error":"%s"}\n' "$ACTION" "$msg" > "$OUT"
+	fi
+	rm -f "$PROG" "$RUN/esim.pid"
+}
+
+# last {"type":"lpa",...} line from lpac
+lpa() {
+	"$LPAC" "$@" 2>/dev/null | grep '"type":"lpa"' | tail -n 1
+}
+
+ok() { echo "$1" | grep -q '"code":0'; }
+
+restart_mm() {
+	progress "Restarting the modem service"
+	[ -x /etc/init.d/modemmanager ] && /etc/init.d/modemmanager start >/dev/null 2>&1
+}
+
+progress "Pausing mobile data"
+[ -x /etc/init.d/modemmanager ] && /etc/init.d/modemmanager stop >/dev/null 2>&1
+sleep 2
+
+case "$ACTION" in
+list)
+	progress "Reading eSIM profiles"
+	r="$(lpa profile list)"
+	ok "$r" && echo "$r" > "$CACHE"
+	;;
+chip)
+	progress "Reading eSIM chip"
+	r="$(lpa chip info)"
+	;;
+enable|disable|delete)
+	progress "Sending $ACTION to the eSIM"
+	r="$(lpa profile "$ACTION" "$ICCID")"
+	if ok "$r"; then
+		progress "Sending carrier notifications"
+		"$LPAC" notification process -a -r >/dev/null 2>&1
+		progress "Reading eSIM profiles"
+		l="$(lpa profile list)"; ok "$l" && echo "$l" > "$CACHE"
+	fi
+	;;
+nickname)
+	progress "Renaming profile"
+	r="$(lpa profile nickname "$ICCID" "$NAME")"
+	l="$(lpa profile list)"; ok "$l" && echo "$l" > "$CACHE"
+	;;
+download)
+	# accepts "LPA:1$smdp$matchingid" (from the QR code) or "1$smdp$matchingid"
+	c="${CODE#LPA:}"; c="${c#lpa:}"
+	smdp="$(echo "$c" | cut -d'$' -f2)"
+	mid="$(echo "$c" | cut -d'$' -f3)"
+	if [ -z "$smdp" ]; then
+		restart_mm
+		finish error "That activation code doesn't look right. It should start with LPA:1\$"
+		exit 0
+	fi
+	progress "Downloading profile from $smdp (this can take a minute)"
+	set -- profile download -s "$smdp"
+	[ -n "$mid" ] && set -- "$@" -m "$mid"
+	[ -n "$CONFIRM" ] && set -- "$@" -c "$CONFIRM"
+	r="$(lpa "$@")"
+	if ok "$r"; then
+		progress "Sending carrier notifications"
+		"$LPAC" notification process -a -r >/dev/null 2>&1
+		l="$(lpa profile list)"; ok "$l" && echo "$l" > "$CACHE"
+	fi
+	;;
+esac
+
+restart_mm
+
+if [ -z "$r" ]; then
+	finish error "No answer from the eSIM. Wait a minute and try again, or reboot the router."
+else
+	finish done "$r"
+fi

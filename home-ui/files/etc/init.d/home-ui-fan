@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# Fan mode (automatic / manual) for Router Home
+
+START=98
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	. /usr/share/home-ui/fan-backend.sh
+	case "$(fan_backend)" in addon|none) return 0 ;; esac
+	if [ "$(fan_backend)" = gpio ]; then
+		procd_open_instance
+		procd_set_param command /usr/sbin/home-ui-fan-gpio
+		procd_set_param respawn 3600 5 0
+		procd_close_instance
+		return 0
+	fi
+	config_load fan
+	local mode
+	config_get mode main mode auto
+	if [ "$mode" != manual ]; then
+		/usr/sbin/home-ui-fan restore
+		return 0
+	fi
+	procd_open_instance
+	procd_set_param command /usr/sbin/home-ui-fan
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+stop_service() {
+	/usr/sbin/home-ui-fan restore
+}
+
+service_triggers() {
+	procd_add_reload_trigger fan
+}

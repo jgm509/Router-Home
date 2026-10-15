@@ -1,0 +1,10 @@
+config fan 'main'
+	# auto = the kernel decides from the temperature, manual = fixed speed
+	option mode 'auto'
+	# manual speed in percent (0-100)
+	option speed '50'
+	# in manual mode the fan goes to full speed above this temperature (C)
+	option safety_temp '85'
+	# SAX1V1K (fan on a plain GPIO): speed is set by switching the pin
+	# on and off every period_us microseconds (software PWM)
+	#option period_us '1000'

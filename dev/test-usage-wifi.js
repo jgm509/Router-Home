@@ -1,0 +1,24 @@
+const { chromium } = require('playwright');
+const PORT = process.env.PORT || 8088;
+(async () => {
+  const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', deviceScaleFactor: 2 });
+  const errs = []; p.on('pageerror', e => errs.push(e.message)); p.on('console', m => m.type() === 'error' && errs.push(m.text()));
+  await p.goto('http://localhost:' + PORT + '/home/'); await p.fill('input[name=password]', 'test'); await p.click('button[type=submit]'); await p.waitForTimeout(1500);
+  await p.goto('http://localhost:' + PORT + '/home/#/network/usage'); await p.waitForTimeout(2500);
+  await p.screenshot({ path: 'shots/us1.png', fullPage: true });
+  await p.goto('http://localhost:' + PORT + '/home/#/network'); await p.waitForTimeout(1500);
+  await p.click('text=Add connection'); await p.waitForTimeout(800);
+  await p.screenshot({ path: 'shots/ww0.png' });
+  await p.click('.sheet .row:has-text("WiFi network")'); await p.waitForTimeout(1200);
+  await p.click('.sheet button:has-text("Find networks")'); await p.waitForTimeout(800);
+  await p.screenshot({ path: 'shots/ww1.png' });
+  await p.click('.sheet .row:has-text("Phone_Hotspot")'); await p.waitForTimeout(300);
+  await p.fill('.sheet input[type=password]', 'hotspot-pass');
+  await p.screenshot({ path: 'shots/ww2.png' });
+  await p.click('.sheet button:has-text("Connect")'); await p.waitForTimeout(4000);
+  const u = await (await fetch('http://localhost:' + PORT + '/debug/uci')).json();
+  console.log('net:', JSON.stringify(Object.entries(u.network).filter(([k]) => /^wwan/.test(k))));
+  console.log('wifi sta:', JSON.stringify(Object.values(u.wireless).filter(w => w.mode === 'sta')));
+  console.log('wan zone:', JSON.stringify(Object.values(u.firewall).find(z => z.name === 'wan').network));
+  console.log(errs.join('\n') || 'no errors'); await b.close();
+})();
