@@ -2,9 +2,9 @@
  * Keeps the app shell available so the installed app opens even when the
  * router is restarting. Router data (/ubus, /cgi-bin) is never cached. */
 'use strict';
-const VERSION = '2.0.0';
+const VERSION = '3.1.8';
 const CACHE = 'router-home-' + VERSION;
-const SHELL = ['./', 'index.html', 'app.css', 'qr.js', 'core.js', 'data.js', 'home.js', 'devices.js', 'wifi.js', 'network.js', 'proton.js', 'system.js',
+const SHELL = ['./', 'index.html', 'app.css', 'qr.js', 'core.js', 'data.js', 'home.js', 'devices.js', 'wifi.js', 'network.js', 'proton.js', 'lans.js', 'firewall.js', 'diag.js', 'agh.js', 'modem.js', 'system.js', 'more.js', 'theme.js',
 	'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-192.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

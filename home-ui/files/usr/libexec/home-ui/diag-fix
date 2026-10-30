@@ -1,0 +1,94 @@
+#!/bin/sh
+# Router Home: one-tap fixes offered by "diagnose". Prints JSON.
+say() { printf '{"ok":%s,"message":"%s"}\n' "$1" "$2"; exit 0; }
+log() { logger -t home-ui "connection check: $*"; }
+dm="$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p" | head -n1)"
+
+case "$1" in
+dns_default)
+	# OpenWrt's normal name service: dnsmasq on port 53, asking the provider's DNS
+	[ -n "$dm" ] || { uci add dhcp dnsmasq >/dev/null; dm="$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p" | head -n1)"; }
+	for o in port noresolv server cachesize; do uci -q delete "dhcp.$dm.$o"; done
+	uci commit dhcp
+	for s in adguardhome AdGuardHome; do [ -x /etc/init.d/$s ] && ! pidof AdGuardHome >/dev/null && /etc/init.d/$s disable 2>/dev/null; done
+	/etc/init.d/dnsmasq enable 2>/dev/null; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+	/etc/init.d/odhcpd restart >/dev/null 2>&1
+	log "name lookups reset to dnsmasq on port 53"
+	say true "Name lookups are back to OpenWrt's normal setup." ;;
+agh_dnsmasq)
+	[ -n "$dm" ] && uci set dhcp.$dm.port=54 && uci commit dhcp
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1; sleep 2
+	log "dnsmasq moved to port 54 (AdGuard Home on 53)"
+	say true "dnsmasq runs on port 54 again, next to AdGuard Home." ;;
+agh_off)
+	for s in adguardhome AdGuardHome; do [ -x /etc/init.d/$s ] && { /etc/init.d/$s stop; /etc/init.d/$s disable; } >/dev/null 2>&1; done
+	exec "$0" dns_default ;;
+agh_start)
+	for s in adguardhome AdGuardHome; do [ -x /etc/init.d/$s ] && { /etc/init.d/$s enable; /etc/init.d/$s restart; } >/dev/null 2>&1; done
+	sleep 4
+	say true "AdGuard Home started." ;;
+agh_bind)
+	# AdGuard Home: also answer on 127.0.0.1 so the router itself can use it
+	done_=""
+	for y in /etc/adguardhome.yaml /etc/AdGuardHome/AdGuardHome.yaml /opt/AdGuardHome/AdGuardHome.yaml /etc/adguardhome/adguardhome.yaml; do
+		[ -f "$y" ] || continue
+		grep -qE '^[[:space:]]*-[[:space:]]*(0\.0\.0\.0|127\.0\.0\.1)[[:space:]]*$' "$y" && { done_=1; continue; }
+		cp "$y" "$y.home-ui.bak"
+		awk '{print} /^[[:space:]]*bind_hosts:[[:space:]]*$/ && !x {getline n; print n; match(n,/^[[:space:]]*/); printf "%s- 127.0.0.1\n", substr(n,1,RLENGTH); x=1}' "$y.home-ui.bak" > "$y" && done_=1
+	done
+	[ -n "$done_" ] || say false "AdGuard Home's settings file was not found. In AdGuard Home → Settings → DNS settings, let it listen on all addresses (0.0.0.0)."
+	for s in adguardhome AdGuardHome; do [ -x /etc/init.d/$s ] && /etc/init.d/$s restart >/dev/null 2>&1; done
+	sleep 4
+	log "AdGuard Home now also answers on 127.0.0.1"
+	say true "AdGuard Home now answers the router too (the old settings file is kept as .home-ui.bak)." ;;
+dhcp_opt6)
+	for o in $(uci -q get dhcp.lan.dhcp_option); do case "$o" in 6,*) uci del_list dhcp.lan.dhcp_option="$o" ;; esac; done
+	uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+	say true "Devices now use the router for name lookups (they pick it up when they reconnect)." ;;
+sta160)
+	/usr/libexec/home-ui/sta160; sleep 2
+	say true "Applied. It is applied again every time the WiFi connection comes up." ;;
+fw_uplink)
+	up=""; for i in $(ubus list 'network.interface.*' | sed 's/^network\.interface\.//'); do
+		ifstatus "$i" | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop' >/dev/null 2>&1 && [ "$(ifstatus "$i" | jsonfilter -e '@.proto')" != wireguard ] && { up="$i"; break; }; done
+	z=""; for s in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)=zone$/\1/p"); do [ "$(uci -q get firewall.$s.name)" = wan ] && z="$s"; done
+	[ -n "$z" ] || { z="$(uci add firewall zone)"; uci set firewall.$z.name=wan; uci set firewall.$z.input=REJECT; uci set firewall.$z.output=ACCEPT; uci set firewall.$z.forward=REJECT; }
+	[ -n "$up" ] && { uci -q get firewall.$z.network | tr ' ' '\n' | grep -qx "$up" || uci add_list firewall.$z.network="$up"; }
+	uci set firewall.$z.masq=1; uci set firewall.$z.mtu_fix=1
+	f=0; for s in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)=forwarding$/\1/p"); do
+		[ "$(uci -q get firewall.$s.src)" = lan ] && [ "$(uci -q get firewall.$s.dest)" = wan ] && { uci -q delete firewall.$s.enabled; f=1; }; done
+	[ $f = 1 ] || { s="$(uci add firewall forwarding)"; uci set firewall.$s.src=lan; uci set firewall.$s.dest=wan; }
+	uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+	log "internet zone repaired"
+	say true "The internet zone is set up again." ;;
+proton_off)
+	/etc/init.d/protonvpn stop >/dev/null 2>&1
+	uci -q set protonvpn.main.enabled=0; uci -q commit protonvpn
+	fw4 reload >/dev/null 2>&1
+	say true "Proton VPN is off. Turn it back on from the VPN page after signing in." ;;
+goback)
+	/usr/libexec/home-ui/goodconf restore >/dev/null 2>&1 && say true "The last working settings are back." || say false "There are no saved working settings yet." ;;
+newip:*)
+	# a different DHCP client ID makes the upstream router treat this as a
+	# new device with a new address (some routers, like ISP hubs, stop
+	# answering an address after their settings change)
+	n="${1#newip:}"; case "$n" in *[!a-zA-Z0-9_.-]*|'') say false "bad name" ;; esac
+	[ "$(uci -q get network.$n.proto)" = dhcp ] || say false "Only works for connections that get their address automatically."
+	id="01$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+	uci set network.$n.clientid="$id"; uci commit network
+	ifdown "$n" 2>/dev/null; sleep 2; ifup "$n"; sleep 12
+	[ -x /usr/libexec/home-ui/sta160 ] && /usr/libexec/home-ui/sta160
+	a="$(ifstatus "$n" 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	log "asked the upstream router for a new address on $n: ${a:-none yet}"
+	say true "New address: ${a:-not yet, wait a moment and check again}." ;;
+ifup:*)
+	n="${1#ifup:}"; case "$n" in *[!a-zA-Z0-9_.-]*|'') say false "bad name" ;; esac
+	uci -q delete network.$n.disabled; [ "$(uci -q get network.$n.auto)" = 0 ] && uci -q delete network.$n.auto
+	uci commit network
+	sec="$(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)\.network='$n'$/\1/p" | head -n1)"
+	[ -n "$sec" ] && [ "$(uci -q get wireless.$sec.disabled)" = 1 ] && { uci -q delete wireless.$sec.disabled; uci commit wireless; wifi reload >/dev/null 2>&1; }
+	ifdown "$n" 2>/dev/null; sleep 2; ifup "$n"; sleep 12
+	[ -x /usr/libexec/home-ui/sta160 ] && /usr/libexec/home-ui/sta160
+	say true "Reconnected $n." ;;
+*) say false "unknown fix" ;;
+esac

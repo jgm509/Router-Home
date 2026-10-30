@@ -1,0 +1,232 @@
+#!/bin/sh
+# Router Home: find out why the internet doesn't work.
+# Prints JSON: {"checks":[{"id","level","title","text","fix","fix_label"}...],"ok":bool}
+# level: ok | info | warn | bad      fix: an id for "diag_fix" (or empty)
+# Every test is short (a few seconds at most).
+
+. /usr/share/libubox/jshn.sh
+
+have() { command -v "$1" >/dev/null 2>&1; }
+t() { local s="$1"; shift; if have timeout; then timeout "$s" "$@"; else "$@"; fi; }
+pingok() { ping -c 1 -W 2 "$1" >/dev/null 2>&1 || ping -c 1 -W 2 "$1" >/dev/null 2>&1; }
+lookup() { t 5 nslookup "${2:-openwrt.org}" $1 2>/dev/null | grep -q '^Name:'; }
+
+json_init
+json_add_array checks
+add() {	# level id title text [fix fix_label]
+	json_add_object
+	json_add_string level "$1"; json_add_string id "$2"; json_add_string title "$3"; json_add_string text "$4"
+	[ -n "$5" ] && { json_add_string fix "$5"; json_add_string fix_label "$6"; }
+	json_close_object
+	[ "$1" = bad ] && BAD=1
+}
+BAD=0
+LOGS="$(logread 2>/dev/null | tail -n 400)"
+
+# ---------- which connection should carry the internet ----------
+lan_sub="$(ip -4 -o addr show dev br-lan 2>/dev/null | awk '{print $4; exit}')"
+wan_nets="$(uci -q show firewall | sed -n "s/^firewall\.\([^.]*\)\.name='wan'$/\1/p" | head -n1)"
+wan_nets="$( [ -n "$wan_nets" ] && uci -q get firewall.$wan_nets.network)"
+up_if=""; up_dev=""; up_gw=""
+for i in $(ubus list 'network.interface.*' 2>/dev/null | sed 's/^network\.interface\.//'); do
+	st="$(ifstatus "$i" 2>/dev/null)"
+	gw="$(echo "$st" | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop' 2>/dev/null | head -n1)"
+	[ -n "$gw" ] || continue
+	proto="$(echo "$st" | jsonfilter -e '@.proto')"
+	[ "$proto" = wireguard ] && continue
+	up_if="$i"; up_gw="$gw"; up_dev="$(echo "$st" | jsonfilter -e '@.l3_device')"
+	up_addr="$(echo "$st" | jsonfilter -e '@["ipv4-address"][0].address' -e '@["ipv4-address"][0].mask' | tr '\n' '/' | sed 's#/$##')"
+	break
+done
+def_dev="$(ip route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1)"
+
+wifi_sta_check() {	# $1 = network name; reports problems of a WiFi uplink
+	local sec dev ssid link
+	sec="$(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)\.network='\?\([^']*\)'\?$/\1 \2/p" | awk -v n="$1" '{for(i=2;i<=NF;i++) if($i==n) print $1}' | while read -r s; do [ "$(uci -q get wireless.$s.mode)" = sta ] && echo "$s"; done | head -n1)"
+	[ -n "$sec" ] || return 1
+	ssid="$(uci -q get wireless.$sec.ssid)"
+	if [ "$(uci -q get wireless.$sec.disabled)" = 1 ]; then
+		add bad wifi_off "The WiFi connection to “$ssid” is turned off" "Turn it on in Internet → the connection." "ifup:$1" "Turn it on"; return 0
+	fi
+	dev="$(ifstatus "$1" 2>/dev/null | jsonfilter -e '@.l3_device' -e '@.device' 2>/dev/null | head -n1)"
+	[ -n "$dev" ] || dev="$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type managed/{print i; exit}')"
+	link="$( [ -n "$dev" ] && iw dev "$dev" link 2>/dev/null)"
+	if [ -z "$dev" ] || echo "$link" | grep -q 'Not connected'; then
+		if echo "$LOGS" | grep -qiE 'WRONG_KEY|4-Way Handshake failed|reason=15|pre-shared key may be incorrect'; then
+			add bad wifi_key "Wrong WiFi password for “$ssid”" "The router could not join “$ssid”: the network refused the password. Check it in Internet → the connection."
+		elif echo "$LOGS" | grep -qiE 'NETWORK-NOT-FOUND|No suitable network found'; then
+			add bad wifi_notfound "“$ssid” is not found" "The router doesn't see that network. Check that it is on and in range, and that the name is spelled exactly."
+		else
+			add bad wifi_down "Not connected to “$ssid”" "The router is not joined to the WiFi network it uses for internet."
+		fi
+		return 0
+	fi
+	sig="$(echo "$link" | sed -n 's/.*signal: \(-*[0-9]*\).*/\1/p')"
+	[ -n "$sig" ] && [ "$sig" -lt -78 ] && add warn wifi_weak "Weak WiFi signal from “$ssid” ($sig dBm)" "The connection may drop or be slow. Move the router closer, or use a cable."
+	drv="$(basename "$(readlink "/sys/class/net/$dev/device/driver" 2>/dev/null)")"
+	if echo "$link" | grep -q '160MHz.*HE-NSS [34]' && case "$drv" in ath11k*) true ;; *) false ;; esac; then
+		add bad sta160 "This WiFi chip loses data at 160 MHz" "The connection to “$ssid” uses 160 MHz with more streams than this chip can handle as a client. Most data is lost." sta160 "Fix it"
+	fi
+	return 0
+}
+
+if [ -z "$up_if" ]; then
+	add bad no_uplink "No internet connection is up" "None of the router's connections to the internet has a working link right now."
+	for i in $wan_nets; do
+		st="$(ifstatus "$i" 2>/dev/null)" || continue
+		proto="$(echo "$st" | jsonfilter -e '@.proto')"
+		[ "$proto" = wireguard ] && continue
+		[ "$(uci -q get network.$i.disabled)" = 1 ] || [ "$(uci -q get network.$i.auto)" = 0 ] && { add info "if_off_$i" "“$i” is switched off" "It doesn't start by itself." "ifup:$i" "Start it"; continue; }
+		wifi_sta_check "$i" && continue
+		err="$(echo "$st" | jsonfilter -e '@.errors[*].code' 2>/dev/null | tr '\n' ' ')"
+		case "$proto" in
+		pppoe)
+			if echo "$LOGS" | grep -qiE 'authentication failed|PAP authentication failed|CHAP authentication failed'; then
+				add bad ppp_auth "PPPoE: wrong username or password" "Your provider refused the PPPoE sign-in on “$i”. Check the username and password from your provider."
+			elif echo "$LOGS" | grep -qiE 'Timeout waiting for PADO'; then
+				add bad ppp_pado "PPPoE: the provider doesn't answer" "Nothing answers PPPoE on the cable of “$i”. Check the cable and the modem; some providers also need a VLAN ID."
+			else add bad "down_$i" "“$i” (PPPoE) is not connected" "${err:+Error: $err. }It may still be trying."; fi ;;
+		dhcp)
+			dev="$(echo "$st" | jsonfilter -e '@.device')"
+			if [ -n "$dev" ] && [ "$(cat /sys/class/net/$dev/carrier 2>/dev/null)" = 0 ]; then
+				add bad "nolink_$i" "No cable on “$i”" "The port ($dev) has no link. Check that the cable is plugged into the modem or upstream router and that it is on."
+			else add bad "nodhcp_$i" "“$i” got no address" "The modem or upstream router did not hand out an address. Restart the modem, or check that it is in router/bridge mode as needed." "ifup:$i" "Try again"; fi ;;
+		modemmanager|qmi|mbim|ncm|3g)
+			add bad "down_$i" "Mobile connection “$i” is not connected" "${err:+Error: $err. }Check the SIM, the APN and the signal on the Mobile page." ;;
+		*) add bad "down_$i" "“$i” is not connected" "${err:+Error: $err.}" "ifup:$i" "Try again" ;;
+		esac
+	done
+else
+	add ok uplink "Connected through “$up_if”" "Address ${up_addr:-?}, upstream router $up_gw."
+	wifi_sta_check "$up_if" >/dev/null
+	# same address range as the home network
+	if [ -n "$lan_sub" ] && [ -n "$up_addr" ]; then
+		l="${lan_sub%.*}"; u="${up_addr%.*}"
+		[ "$l" = "$u" ] && add bad overlap "Your home network uses the same addresses as the upstream network" "Both use ${l}.x. Change the router's address (Internet → Home network) to something else, for example 192.168.10.1."
+	fi
+	# routing: the default route should use the uplink
+	if [ -n "$def_dev" ] && [ "$def_dev" != "$up_dev" ]; then
+		case "$def_dev" in
+			*wg*|*proton*|*tun*|tailscale*) add warn route_vpn "Internet traffic goes into a VPN ($def_dev)" "If the VPN isn't connected, nothing gets through." proton_off "Turn off Proton VPN" ;;
+		esac
+	fi
+fi
+
+# ---------- reachability ----------
+gw_ok=0; net_ok=0
+[ -n "$up_gw" ] && pingok "$up_gw" && gw_ok=1
+for a in 1.1.1.1 8.8.8.8 9.9.9.9; do pingok "$a" && { net_ok=1; break; }; done
+if [ -n "$up_if" ]; then
+	if [ $net_ok = 1 ]; then add ok ping "The internet answers" "The router reaches 1.1.1.1 / 8.8.8.8."
+	elif [ $gw_ok = 1 ]; then add bad ping "The upstream router answers, the internet doesn't" "The router reaches $up_gw but nothing past it. The modem or upstream router has no internet, or blocks this router."
+	elif ip neigh show "$up_gw" 2>/dev/null | grep -qE 'FAILED|INCOMPLETE'; then
+		add bad ping "The upstream router doesn't answer this router at all" "This router asks for $up_gw but never gets a reply, even though it is connected and got address ${up_addr%/*}. The upstream router is ignoring it. Common causes: an address reservation or IP-MAC binding for this router there (for example after changing this router's name or the upstream router's settings), MAC filtering or client isolation, or another device with the same MAC. Remove or update the reservation on the upstream router, or restart it. Or ask it for a new address." "newip:$up_if" "Get a new address"
+	else add bad ping "Nothing answers past this router" "Neither the upstream router ($up_gw) nor the internet answers. The link may be broken (WiFi, cable) even though it looks connected. Reconnecting often helps; if not, restart the upstream router." "ifup:$up_if" "Reconnect"; fi
+fi
+
+# ---------- names (DNS) ----------
+dm="$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p" | head -n1)"
+port="$(uci -q get dhcp.$dm.port)"; noresolv="$(uci -q get dhcp.$dm.noresolv)"; servers="$(uci -q get dhcp.$dm.server)"
+listen53="$(netstat -lnu 2>/dev/null | grep -E '[:.]53 ' | head -n1)"
+agh=""; for s in adguardhome AdGuardHome; do [ -x /etc/init.d/$s ] && agh=$s; done
+lan_ip="${lan_sub%/*}"
+agh_run=""; pidof AdGuardHome >/dev/null 2>&1 && agh_run=1
+# AdGuard Home on port 53 and dnsmasq set to the same port: dnsmasq can't
+# start, and with it go DHCP (addresses for devices) and local names
+if [ -n "$agh_run" ] && ! pidof dnsmasq >/dev/null && { [ -z "$port" ] || [ "$port" = 53 ]; }; then
+	add bad dnsmasq_port "dnsmasq can't start: AdGuard Home uses its port" "Both want port 53. Without dnsmasq, devices don't get addresses (DHCP) and local names (.lan) don't work. With AdGuard Home, dnsmasq belongs on port 54." agh_dnsmasq "Move dnsmasq to port 54"
+fi
+if [ $net_ok = 1 ] && lookup 127.0.0.1; then
+	add ok dns "Name lookups work" "Website names are found."
+elif [ $net_ok = 1 ] && [ -n "$lan_ip" ] && lookup "$lan_ip"; then
+	# devices are fine, the router itself isn't: AdGuard Home (or another
+	# DNS app) answering on the LAN address only is the usual reason
+	if [ -n "$agh" ] && pidof AdGuardHome >/dev/null; then
+		add bad dns_self "The router itself can't look up names (your devices can)" "AdGuard Home answers on $lan_ip but not on the router's own address (127.0.0.1). The router then can't sync its clock, update or install apps." agh_bind "Let the router use AdGuard Home"
+	else
+		add bad dns_self "The router itself can't look up names (your devices can)" "Something answers on $lan_ip, but not on 127.0.0.1, which the router uses for itself. The router then can't sync its clock, update or install apps." dns_default "Reset name lookups"
+	fi
+elif [ $net_ok = 0 ] && [ -n "$listen53" ] && [ "$noresolv" != 1 ]; then
+	add info dns_wait "Name lookups can't be tested yet" "The router's name service is running; it needs the internet to answer first."
+elif [ -n "$agh_run" ] && [ -n "$listen53" ]; then
+	clk=""; [ "$(date +%Y)" -lt 2025 ] && clk=" The router's clock is wrong, which breaks encrypted DNS."
+	add bad dns_agh_fail "AdGuard Home answers, but can't find websites" "It can't get answers from its upstream DNS servers (AdGuard Home → Settings → DNS settings → Upstream DNS).$clk If an upstream is 127.0.0.1:54, dnsmasq must run on port 54. To get back online now, turn AdGuard Home off; turn it on again when it's set up." agh_off "Turn off AdGuard Home"
+else
+	if [ -z "$listen53" ]; then
+		if [ -n "$port" ] && [ "$port" != 53 ]; then
+			if [ -n "$agh" ]; then
+				add bad dns_agh "AdGuard Home isn't answering" "Name lookups were moved to AdGuard Home (dnsmasq on port $port), but AdGuard Home isn't running." agh_start "Start AdGuard Home"
+			else
+				add bad dns_moved "Name lookups were moved to an app that isn't installed" "dnsmasq was moved to port $port (for AdGuard Home or similar), but nothing answers on the normal port. No device can find websites." dns_default "Put name lookups back"
+			fi
+		elif ! pidof dnsmasq >/dev/null; then
+			add bad dns_dead "The router's name service (dnsmasq) isn't running" "No device can find websites. $(echo "$LOGS" | grep -i dnsmasq | grep -iE 'error|fail|bad|illegal' | tail -n1 | cut -c1-200)" dns_default "Reset and start it"
+		else
+			add bad dns_none "Nothing answers name lookups" "" dns_default "Reset name lookups"
+		fi
+	elif [ "$noresolv" = 1 ] && [ -n "$servers" ]; then
+		good=""; for s in $servers; do a="${s%%#*}"; case "$a" in /*) continue ;; esac; lookup "$a" && good=1; done
+		if [ -z "$good" ]; then
+			add bad dns_servers "The DNS servers set on the router don't answer" "The router only asks: $servers. None of them answers." dns_default "Use normal DNS"
+		else add bad dns_fail "Name lookups fail" "The router's name service answers, but can't find websites." dns_default "Reset name lookups"; fi
+	elif [ $net_ok = 1 ] && lookup 1.1.1.1; then
+		add bad dns_fail "Name lookups fail on the router" "Public DNS works, the router's own setup doesn't." dns_default "Reset name lookups"
+	else
+		add bad dns_fail "Name lookups fail" "$( [ $net_ok = 1 ] && echo 'Public DNS servers do not answer either; your provider may block them.' || echo 'Fix the connection first.')"
+	fi
+fi
+# what devices are told to use for DNS
+for o in $(uci -q get dhcp.lan.dhcp_option); do
+	case "$o" in 6,*) for a in $(echo "${o#6,}" | tr ',' ' '); do
+		lookup "$a" || add warn dhcp_dns "Devices are told to use DNS server $a, which doesn't answer" "Set by DHCP option 6 on the home network." dhcp_opt6 "Remove it"
+	done ;; esac
+done
+
+# ---------- the router's own downloads ----------
+if [ $net_ok = 1 ] && { lookup 127.0.0.1 downloads.openwrt.org || lookup "$lan_ip" downloads.openwrt.org; }; then
+	if t 12 uclient-fetch -T 8 -q -O /dev/null https://downloads.openwrt.org/ 2>/dev/null; then
+		add ok https "Secure websites load" "The router can download (updates, apps)."
+	else
+		y="$(date +%Y)"
+		if [ "$y" -lt 2025 ]; then add bad clock "The router's clock is wrong ($(date '+%F'))" "Secure websites refuse a wrong date. It fixes itself once time sync (NTP) reaches the internet."
+		else add warn https "The router can't open secure websites" "Pings and names work, but downloads fail. A VPN kill switch or a firewall rule may block the router's own traffic."; fi
+	fi
+fi
+
+# ---------- firewall ----------
+if [ -n "$up_if" ]; then
+	z=""; for s in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)=zone$/\1/p"); do
+		for n in $(uci -q get firewall.$s.network); do [ "$n" = "$up_if" ] && z="$s"; done; done
+	if [ -z "$z" ]; then
+		add bad fw_zone "“$up_if” has no firewall zone" "Devices at home can't go through it." fw_uplink "Add it to the internet zone"
+	else
+		zn="$(uci -q get firewall.$z.name)"
+		[ "$(uci -q get firewall.$z.masq)" = 1 ] || add bad fw_masq "NAT is off for the internet zone ($zn)" "Devices at home can't share the router's internet address." fw_uplink "Turn NAT on"
+		fwd=0; for s in $(uci -q show firewall | sed -n "s/^firewall\.\([^.=]*\)=forwarding$/\1/p"); do
+			[ "$(uci -q get firewall.$s.src)" = lan ] && [ "$(uci -q get firewall.$s.dest)" = "$zn" ] && [ "$(uci -q get firewall.$s.enabled)" != 0 ] && fwd=1; done
+		[ $fwd = 1 ] || add bad fw_fwd "The home network may not reach the internet zone ($zn)" "There is no forwarding from lan to $zn." fw_uplink "Allow it"
+	fi
+fi
+[ "$(uci -q get dhcp.lan.ignore)" = 1 ] && add warn dhcp_off "The home network hands out no addresses" "DHCP is off on lan: new devices get no address unless set by hand."
+
+# ---------- VPNs ----------
+if [ "$(uci -q get protonvpn.main.enabled)" = 1 ]; then
+	hs="$(wg show protonvpn latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
+	now="$(date +%s)"
+	if [ -z "$hs" ] || [ "$hs" = 0 ] || [ $((now - hs)) -gt 300 ]; then
+		add warn proton "Proton VPN is on but not connected" "With the kill switch or “all traffic through the VPN”, this blocks the internet. Sign in again on the VPN page, or turn it off." proton_off "Turn off Proton VPN"
+	fi
+fi
+
+# ---------- what changed since it last worked ----------
+if [ -x /usr/libexec/home-ui/goodconf ]; then
+	ch="$(/usr/libexec/home-ui/goodconf changed 2>/dev/null | tr '\n' ' ')"
+	last="$(/usr/libexec/home-ui/goodconf list 2>/dev/null | head -n1 | cut -d' ' -f2,3)"
+	[ -n "$ch" ] && [ -n "$last" ] && [ "$BAD" = 1 ] && add info changed "Settings changed since the internet last worked ($last)" "Changed: $ch" goback "Go back to working settings"
+fi
+
+json_close_array
+json_add_boolean ok "$([ "$BAD" = 0 ] && echo 1 || echo 0)"
+json_add_string time "$(date '+%F %T')"
+json_add_int epoch "$(date +%s)"
+json_dump

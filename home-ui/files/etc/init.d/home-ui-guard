@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+# Router Home: remember the last working settings, go back to them when a
+# change breaks the internet (/etc/config/home-ui-guard)
+START=99
+USE_PROCD=1
+
+start_service() {
+	[ "$(uci -q get home-ui-guard.main.enabled)" = 0 ] && return 0
+	procd_open_instance
+	procd_set_param command /usr/libexec/home-ui/goodconf watch
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger home-ui-guard
+}

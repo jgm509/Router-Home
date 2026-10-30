@@ -267,7 +267,10 @@ const Proton = (() => {
 				onDone && onDone();
 			}));
 			return h('div',
-				sectionTitle('Protection'),
+				sectionTitle(['Protection', App.explain('Protection',
+					'Kill switch: if the VPN connection drops, home devices lose internet instead of going online without the VPN. Your real address is never shown, but you notice outages.',
+					'Proton DNS: website names are looked up through Proton while connected, so your internet provider can\'t see them. If you use AdGuard Home, Proton DNS bypasses it.',
+					{ rec: 'Kill switch on if hiding your address matters; Proton DNS on unless you rely on AdGuard Home blocking.' })]),
 				group(
 					row({ icon: 'lock', label: 'Kill switch', sub: auto ? 'Block internet for home devices if the VPN drops' : 'Only works when all home traffic goes through the VPN', right: ks }),
 					row({ icon: 'dns', label: 'Use Proton DNS', sub: 'Look up websites through Proton while connected', right: dns })),

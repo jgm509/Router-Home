@@ -18,7 +18,11 @@
 					"restore_status",
 					"data_usage",
 					"led_info",
-					"addon_list"
+					"addon_list",
+					"security_info",
+					"upnp_status",
+					"pkg_status",
+					"guard_info"
 				],
 				"luci-rpc": [
 					"getHostHints",
@@ -122,7 +126,18 @@
 					"wifi_scan",
 					"restore_dismiss",
 					"addon_install",
-					"addon_remove"
+					"addon_remove",
+					"restore_retry",
+					"pkg_install",
+					"diagnose",
+					"diag_fix",
+					"guard_set",
+					"guard_action",
+					"soft_reset",
+					"agh",
+					"modem_extra",
+					"sysx",
+					"iot"
 				],
 				"luci": [
 					"setPassword",
@@ -174,6 +189,10 @@
 					"write"
 				],
 				"/tmp/home-ui-addon.tar.gz": [
+					"write"
+				],
+				"/tmp/home-ui-iot.tar.gz": [ "write" ],
+				"/tmp/home-ui-gps.tar.gz": [
 					"write"
 				]
 			},

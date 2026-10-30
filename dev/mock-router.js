@@ -14,7 +14,8 @@ const uci = {
 	protonvpn: { main: { '.type': 'instance', enabled: '1', interface: 'protonvpn', hop_mode: 'standard', killswitch: '0', vpn_dns: 'off', rotation_enabled: '0', rotation_mode: 'interval', rotation_interval: '360' } },
 	network: {
 		loopback: { '.type': 'interface', proto: 'static', device: 'lo', ipaddr: '127.0.0.1' },
-		lan: { '.type': 'interface', proto: 'static', device: 'br-lan', ipaddr: '192.168.1.1', netmask: '255.255.255.0' },
+		brlan: { '.type': 'device', name: 'br-lan', type: 'bridge', ports: ['lan1', 'lan2', 'lan3', 'lan4'] },
+		lan: { '.type': 'interface', proto: 'static', device: 'br-lan', ipaddr: '192.168.1.1', netmask: '255.255.255.0', ip6assign: '60' },
 		wan: { '.type': 'interface', proto: 'dhcp', device: 'eth0', metric: '10' },
 		wan6: { '.type': 'interface', proto: 'dhcpv6', device: 'eth0' },
 		wwan: { '.type': 'interface', proto: 'modemmanager', device: '/sys/devices/platform/soc@0/28000000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0', apn: 'internet', iptype: 'ipv4v6', metric: '20', allow_roaming: '1' },
@@ -39,13 +40,67 @@ const uci = {
 		cfg10: { '.type': 'defaults', input: 'REJECT', output: 'ACCEPT', forward: 'REJECT' },
 		cfg11: { '.type': 'zone', name: 'lan', network: ['lan'], input: 'ACCEPT', output: 'ACCEPT', forward: 'ACCEPT' },
 		cfg12: { '.type': 'zone', name: 'wan', network: ['wan', 'wan6', 'wwan', 'vpn'], input: 'REJECT', output: 'ACCEPT', forward: 'REJECT', masq: '1' },
-		cfg13: { '.type': 'rule', name: 'Pause internet: kids-tablet', src: 'lan', dest: '*', src_mac: ['de:ad:be:ef:00:07'], proto: 'all', target: 'REJECT' }
+		cfg13: { '.type': 'rule', name: 'Pause internet: kids-tablet', src: 'lan', dest: '*', src_mac: ['de:ad:be:ef:00:07'], proto: 'all', target: 'REJECT' },
+		cfg14: { '.type': 'forwarding', src: 'lan', dest: 'wan' },
+		cfg15: { '.type': 'rule', name: 'Allow-DHCP-Renew', src: 'wan', proto: 'udp', dest_port: '68', target: 'ACCEPT', family: 'ipv4' },
+		cfg16: { '.type': 'rule', name: 'Allow-Ping', src: 'wan', proto: 'icmp', icmp_type: 'echo-request', family: 'ipv4', target: 'ACCEPT' },
+		cfg17: { '.type': 'rule', name: 'Allow-IGMP', src: 'wan', proto: 'igmp', family: 'ipv4', target: 'ACCEPT' },
+		cfg18: { '.type': 'redirect', name: 'Game server', src: 'wan', src_dport: '25565', dest: 'lan', dest_ip: '192.168.1.146', dest_port: '25565', proto: ['tcp'], target: 'DNAT' }
 	},
 	system: { cfg20: { '.type': 'system', hostname: BOARD.includes('cbe') ? 'CBE1V1K' : 'SBE1V1K', zonename: 'Asia/Hong Kong', timezone: 'HKT-8' } },
 	'cbe-led': { main: { '.type': 'led', enabled: '1', brightness: '96', interval: '15' } },
 	'sbe-led': { main: { '.type': 'led', enabled: '1', interval: '15' } },
-	'home-ui': {}
+	'home-ui': {},
+	dropbear: { cfg30: { '.type': 'dropbear', PasswordAuth: 'on', RootPasswordAuth: 'on', Port: '22' } },
+	upnpd: process.env.UPNP ? { config: { '.type': 'upnpd', enabled: '0', secure_mode: '1', internal_iface: 'lan' } } : undefined
 };
+if (!uci.upnpd) delete uci.upnpd;
+
+
+const AGH = { signed: !!process.env.AGH_SIGNED, prot: true, rules: ['||tiktok.com^', '@@||example.org^$important', '! comment'],
+	filters: [{ id: 1, name: 'AdGuard DNS filter', url: 'https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt', enabled: true, rules_count: 61234, last_updated: '2026-10-20T10:00:00Z' }],
+	ids: ['tiktok'], schedule: { time_zone: 'America/Toronto' }, rewrites: [{ domain: 'nas.lan', answer: '192.168.1.10' }],
+	ups: ['https://dns.quad9.net/dns-query', '[/lan/]127.0.0.1:54', '[/in-addr.arpa/]127.0.0.1:54', '[/ip6.arpa/]127.0.0.1:54'], mode: 'load_balance',
+	clients: [], sb: true, pc: false, ss: false };
+function aghCall(m, path, body) {
+	const b = body ? JSON.parse(body) : null; const p = path.split('?')[0];
+	const ok = d => [0, { status: 200, data: d === undefined ? 'OK' : d }];
+	switch (m + ' ' + p) {
+	case 'GET /control/status': return ok({ protection_enabled: AGH.prot, version: 'v0.107.57', running: true });
+	case 'POST /control/protection': AGH.prot = b.enabled; return ok();
+	case 'GET /control/stats': return ok({ time_units: 'hours', num_dns_queries: 18234, num_blocked_filtering: 2311, avg_processing_time: 0.012, top_blocked_domains: [{ 'tiktok.com': 312 }, { 'doubleclick.net': 201 }, { 'app-measurement.com': 99 }] });
+	case 'GET /control/querylog': return ok({ data: [
+		{ question: { name: 'tiktok.com', type: 'A' }, client: '192.168.1.162', client_info: { name: 'Phone' }, time: new Date().toISOString(), reason: 'FilteredBlockedService', service_name: 'TikTok' },
+		{ question: { name: 'www.google.com', type: 'A' }, client: '192.168.1.162', client_info: { name: 'Phone' }, time: new Date().toISOString(), reason: 'NotFilteredNotFound' },
+		{ question: { name: 'doubleclick.net', type: 'A' }, client: '192.168.1.146', time: new Date().toISOString(), reason: 'FilteredBlackList' }].filter(e => !path.includes('blocked') || e.reason.startsWith('Filtered')) });
+	case 'GET /control/filtering/status': return ok({ enabled: true, filters: AGH.filters, whitelist_filters: [], user_rules: AGH.rules });
+	case 'POST /control/filtering/set_rules': AGH.rules = b.rules; return ok();
+	case 'GET /control/filtering/check_host': return ok(path.includes('tiktok') ? { reason: 'FilteredBlackList', rules: [{ text: '||tiktok.com^' }] } : { reason: 'NotFilteredNotFound', rules: [] });
+	case 'POST /control/filtering/add_url': AGH.filters.push({ id: AGH.filters.length + 1, name: b.name, url: b.url, enabled: true, rules_count: 1000 }); return ok();
+	case 'POST /control/filtering/remove_url': AGH.filters = AGH.filters.filter(f => f.url !== b.url); return ok();
+	case 'POST /control/filtering/set_url': AGH.filters.forEach(f => { if (f.url === b.url) f.enabled = b.data.enabled; }); return ok();
+	case 'POST /control/filtering/refresh': return ok({ updated: 1 });
+	case 'GET /control/blocked_services/all': return ok({ blocked_services: [['tiktok', 'TikTok'], ['youtube', 'YouTube'], ['instagram', 'Instagram'], ['fortnite', 'Fortnite'], ['roblox', 'Roblox']].map(([id, name]) => ({ id, name })) });
+	case 'GET /control/blocked_services/get': return ok({ ids: AGH.ids, schedule: AGH.schedule });
+	case 'PUT /control/blocked_services/update': AGH.ids = b.ids; AGH.schedule = b.schedule; return ok();
+	case 'GET /control/clients': return ok({ clients: AGH.clients, auto_clients: [] });
+	case 'POST /control/clients/add': AGH.clients.push(b); return ok();
+	case 'POST /control/clients/update': AGH.clients = AGH.clients.map(c => c.name === b.name ? b.data : c); return ok();
+	case 'POST /control/clients/delete': AGH.clients = AGH.clients.filter(c => c.name !== b.name); return ok();
+	case 'GET /control/dns_info': return ok({ upstream_dns: AGH.ups, upstream_mode: AGH.mode, bootstrap_dns: ['9.9.9.10'] });
+	case 'POST /control/dns_config': if (b.upstream_dns) AGH.ups = b.upstream_dns; if (b.upstream_mode) AGH.mode = b.upstream_mode; return ok();
+	case 'POST /control/test_upstream_dns': return ok(Object.fromEntries(b.upstream_dns.map(u => [u, 'OK'])));
+	case 'GET /control/rewrite/list': return ok(AGH.rewrites);
+	case 'POST /control/rewrite/add': AGH.rewrites.push(b); return ok();
+	case 'POST /control/rewrite/delete': AGH.rewrites = AGH.rewrites.filter(r => r.domain !== b.domain); return ok();
+	case 'GET /control/safebrowsing/status': return ok({ enabled: AGH.sb });
+	case 'GET /control/parental/status': return ok({ enabled: AGH.pc });
+	case 'GET /control/safesearch/status': return ok({ enabled: AGH.ss, google: true });
+	case 'PUT /control/safesearch/settings': AGH.ss = b.enabled; return ok();
+	}
+	if (/^POST \/control\/(safebrowsing|parental)\/(enable|disable)$/.test(m + ' ' + p)) { const [, k, v] = p.match(/control\/(\w+)\/(\w+)/); AGH[k === 'safebrowsing' ? 'sb' : 'pc'] = v === 'enable'; return ok(); }
+	return [0, { status: 404, data: 'not found' }];
+}
 
 function sectionsOut(cfg) {
 	const out = {}; let i = 0;
@@ -113,7 +168,7 @@ function ubus(object, method, a) {
 	case 'session.destroy': return [0];
 	case 'uci.get': return uci[a.config] ? [0, { values: sectionsOut(uci[a.config]) }] : [4];
 	case 'uci.set': Object.assign(uci[a.config][a.section] = uci[a.config][a.section] || {}, a.values); return [0];
-	case 'uci.add': { const n = a.name || ('cfg' + (cfgn++)); uci[a.config][n] = Object.assign({ '.type': a.type }, a.values); return [0, { section: n }]; }
+	case 'uci.add': { uci[a.config] = uci[a.config] || {}; const n = a.name || ('cfg' + (cfgn++)); uci[a.config][n] = Object.assign({ '.type': a.type }, a.values); return [0, { section: n }]; }
 	case 'uci.delete': if (a.options) { for (const o of a.options) delete uci[a.config][a.section][o]; } else delete uci[a.config][a.section]; return [0];
 	case 'uci.apply': return [0];
 	case 'uci.commit': return [0];
@@ -174,9 +229,58 @@ function ubus(object, method, a) {
 	case 'protonvpn.refresh_locations': return [0, { started: true }];
 	case 'protonvpn.refresh_status': return [0, { state: 'done' }];
 	case 'uci.confirm': return [0];
-	case 'home-ui.info': return [0, { version: '1.3.0', board: BOARD, hostname: uci.system.cfg20.hostname, led: BOARD.includes('cbe') ? 'cbe' : 'sbe', modem: BOARD.includes('cbe'), lpac: true, tailscale: true, wireguard: true, modemmanager: true, doh: false, luci: true, protonvpn: true, protonvpn_login: true }];
+	case 'home-ui.modem_extra': {
+		const ME = PV.me = PV.me || { cur: ['any'], sms: [{ index: 0, sms: { sms: { content: { number: '+15551234567', text: 'Your data plan is 80% used.' }, properties: { state: 'received', 'pdu-type': 'deliver', timestamp: '2026-10-26T10:00:00-04:00' } } } }], gps: false, job: null };
+		const SUP = ['eutran-2', 'eutran-4', 'eutran-5', 'eutran-12', 'eutran-13', 'eutran-66', 'eutran-71', 'ngran-2', 'ngran-5', 'ngran-66', 'ngran-71', 'ngran-77'];
+		switch (a.action) {
+		case 'info': return [0, { modem: { modem: { generic: { 'supported-bands': SUP, 'current-bands': ME.cur[0] === 'any' ? SUP : ME.cur } } }, signal: { modem: { signal: { lte: { rsrp: '-97.0', rsrq: '-11.0', rssi: '-68.0', snr: '9.2' }, '5g': { rsrp: '-101.0', rsrq: '-12.0', snr: '5.0' } } } }, qmicli: true,
+			rf: "[/dev/wwan0mbim0] Band Information:\n\tRadio Interface:   'lte'\n\tActive Band Class: 'eutran-66'\n\tActive Channel:    '66786'\n\tRadio Interface:   '5gnr'\n\tActive Band Class: 'ngran-71'\n\tActive Channel:    '126900'\n",
+			ca: "[/dev/wwan0mbim0] Successfully got carrier aggregation info\nPrimary Cell Info\n\tPhysical Cell ID: '123'\n\tRX Channel: '66786'\n\tDL Bandwidth: '20'\n\tLTE Band: 'eutran-66'\nSecondary Cell Info\n\tPhysical Cell ID: '310'\n\tRX Channel: '5110'\n\tLTE Band: 'eutran-12'\n", cell: "Intrafrequency LTE Info\n" + Array.from({ length: 40 }, (_, i) => `\tCell [${i}]:\n\t\tPhysical Cell ID: '${100 + i}'\n\t\tRSRP: '-${90 + i}.0'\n`).join(''), sysprefs: '' }];
+		case 'bands': ME.cur = a.bands === 'any' ? ['any'] : a.bands.split('|'); return [0, { ok: true }];
+		case 'sms_list': return [0, { messages: ME.sms }];
+		case 'sms_send': ME.sms.push({ index: ME.sms.length + 10, sms: { sms: { content: { number: a.number, text: a.text }, properties: { state: 'sent', 'pdu-type': 'submit', timestamp: new Date().toISOString() } } } }); return [0, { ok: true }];
+		case 'sms_delete': ME.sms = ME.sms.filter(m => m.index !== a.index); return [0, { ok: true }];
+		case 'time': return [0, { time: { modem: { time: { current: new Date().toISOString() } } }, router: '2026-10-24 12:00:00 EDT' }];
+		case 'time_set': return [0, { ok: true, changed: true, time: new Date().toString() }];
+		case 'band_test': ME.bt = { t: Date.now(), list: a.bands.split('|') }; return [0, { started: true }];
+		case 'band_test_stop': ME.bt = null; return [0, { ok: true }];
+		case 'band_test_status': { if (!ME.bt) return [0, { state: 'idle' }]; const step = Math.min(ME.bt.list.length, 1 + Math.floor((Date.now() - ME.bt.t) / 2000));
+			const res = ME.bt.list.slice(0, step - 1).map((b, i) => i % 3 === 1 ? { band: b, ok: false, why: 'no service' } : { band: b, ok: true, rsrp: -80 - i * 3, rsrq: -10, sinr: 15 - i * 2, nr_rsrp: i ? null : -100, nr_sinr: null });
+			if (Date.now() - ME.bt.t > ME.bt.list.length * 2000) return [0, { state: 'done', results: ME.bt.list.map((b, i) => i % 3 === 1 ? { band: b, ok: false, why: 'no service' } : { band: b, ok: true, rsrp: -80 - i * 3, rsrq: -10, sinr: 15 - i * 2, nr_rsrp: null, nr_sinr: null }) }];
+			return [0, { state: 'running', step, total: ME.bt.list.length, band: ME.bt.list[step - 1], results: res }]; }
+		case 'gps_status': if (ME.job && ME.job.state === 'running' && Date.now() - ME.job.t > 4000) ME.job = { state: 'done', lat: 45.0, lon: -75.0, alt: 80, time: Date.now() / 1000 | 0 }; return [0, { tool: ME.gps, qrtr: true, job: ME.job }];
+		case 'gps_get': ME.job = { state: 'running', t: Date.now() }; return [0, { started: true }];
+		case 'gps_install': ME.gps = true; return [0, { ok: true }];
+		case 'gps_remove': ME.gps = false; ME.job = null; return [0, { ok: true }];
+		}
+		return [0, { error: 'unknown' }];
+	}
+	case 'home-ui.agh': if (a.action === 'info') return [0, { installed: true, running: true, curl: true, signed_in: AGH.signed, port: 3000, config: '/etc/adguardhome/adguardhome.yaml' }];
+		if (a.action === 'login') { if (a.pass !== 'test') return [0, { error: 'Wrong user name or password' }]; AGH.signed = true; return [0, { ok: true }]; }
+		if (a.action === 'logout') { AGH.signed = false; return [0, { ok: true }]; }
+		if (!AGH.signed) return [0, { error: 'signin' }];
+		return aghCall(a.method, a.path, a.body);
+	case 'home-ui.soft_reset': PV.softreset = a; return [0, { ok: true, address: '192.168.1.1' }];
+	case 'home-ui.diagnose': if (a.action === 'start') { PV.diag = Date.now(); return [0, { started: true }]; }
+		if (PV.diag && Date.now() - PV.diag < 3500) return [0, { state: 'running' }];
+		return [0, { ok: !!PV.fixed, time: '2026-10-18 12:09:17', epoch: (Date.now() / 1000 | 0) - 2 * 86400, checks: [
+			{ level: 'ok', id: 'uplink', title: 'Connected through “wwan”', text: 'Address 192.168.2.98/24, upstream router 192.168.2.1.' },
+			PV.fixed ? { level: 'ok', id: 'ping', title: 'The internet answers', text: 'The router reaches 1.1.1.1 / 8.8.8.8.' } : { level: 'bad', id: 'ping', title: 'Nothing answers past this router', text: 'Neither the upstream router (192.168.2.1) nor the internet answers.', fix: 'ifup:wwan', fix_label: 'Reconnect' },
+			PV.fixed ? { level: 'ok', id: 'dns', title: 'Name lookups work', text: 'Website names are found.' } : { level: 'bad', id: 'dns_servers', title: 'The DNS servers set on the router don\'t answer', text: 'The router only asks: 1.2.3.4 5.6.7.8. None of them answers.', fix: 'dns_default', fix_label: 'Use normal DNS' },
+			{ level: 'warn', id: 'proton', title: 'Proton VPN is on but not connected', text: 'Sign in again on the VPN page, or turn it off.', fix: 'proton_off', fix_label: 'Turn off Proton VPN' },
+			PV.fixed ? null : { level: 'info', id: 'changed', title: 'Settings changed since the internet last worked (2026-10-19 08:10:12)', text: 'Changed: dhcp network', fix: 'goback', fix_label: 'Go back to working settings' }].filter(Boolean) }];
+	case 'home-ui.diag_fix': PV.fixed = true; return [0, { ok: true, message: 'Name lookups are back to OpenWrt\'s normal setup.' }];
+	case 'home-ui.guard_info': return [0, { enabled: PV.genabled !== false, auto_recover: PV.gauto !== false, wait: PV.gwait || 10, points: [{ id: '1792400000', when: '2026-10-19 05:33', uplink: 'wl0.1-sta0' }, { id: '1792300000', when: '2026-10-18 01:46', uplink: 'phy0-sta0' }],
+		changed: 'dhcp network ', diff: "### dhcp\n+\toption noresolv '1'\n+\tlist server '1.2.3.4'\n### network\n-\toption peerdns '1'\n+\toption peerdns '0'", undo: !!process.env.RECOVERED, recovered_at: process.env.RECOVERED && !PV.gdismiss ? 1792430000 : undefined, now: Date.now() / 1000 | 0 }];
+	case 'home-ui.guard_set': if (a.enabled != null) PV.genabled = a.enabled; if (a.auto_recover != null) PV.gauto = a.auto_recover; if (a.wait) PV.gwait = a.wait; return [0, { ok: true }];
+	case 'home-ui.guard_action': if (a.action === 'dismiss') PV.gdismiss = true; return [0, a.action === 'save' ? { error: "the internet doesn't work right now" } : { ok: true }];
+	case 'home-ui.security_info': return [0, { root_password: !process.env.NOPW, dropbear: true, upnp_installed: !!uci.upnpd, listening: 'tcp 0.0.0.0:22;tcp 0.0.0.0:80;' }];
+	case 'home-ui.upnp_status': return [0, { installed: !!uci.upnpd, luci_app: !!uci.upnpd, running: !!(uci.upnpd && uci.upnpd.config.enabled === '1'), leases: uci.upnpd && uci.upnpd.config.enabled === '1' ? [{ proto: 'UDP', ext: 3074, ip: '192.168.1.146', port: 3074, expires: 0, desc: 'Xbox' }] : [] }];
+	case 'home-ui.pkg_install': PV.pkg = Date.now(); return [0, { started: true }];
+	case 'home-ui.pkg_status': if (PV.pkg && Date.now() - PV.pkg > 3000) { uci.upnpd = { config: { '.type': 'upnpd', enabled: '0', secure_mode: '1', internal_iface: 'lan' } }; return [0, { state: 'done', message: 'Installed' }]; } return [0, PV.pkg ? { state: 'running', message: 'Installing…' } : { state: 'idle' }];
+	case 'home-ui.info': return [0, { version: '1.3.0', board: BOARD, hostname: uci.system.cfg20.hostname, led: BOARD.includes('cbe') ? 'cbe' : 'sbe', modem: BOARD.includes('cbe'), lpac: true, adguard: true, tailscale: true, wireguard: true, modemmanager: true, doh: false, luci: true, protonvpn: true, protonvpn_login: true }];
 	case 'home-ui.online': return [0, { online: true, device: 'wwan0', via_modem: true, latency: '38.4' }];
-	case 'home-ui.neigh': return [0, { neigh: Object.entries(clients).map(([m, c]) => `${c.ip} dev br-lan lladdr ${m} ${c.wired && c.name === 'nas' ? 'STALE' : 'REACHABLE'}`).join('\n') + '\n10.181.44.13 dev wwan0 lladdr 11:22:33:44:55:66 REACHABLE' }];
+	case 'home-ui.neigh': return [0, { neigh: Object.entries(clients).map(([m, c]) => `${c.ip} dev br-lan lladdr ${m} ${c.wired && c.name === 'nas' ? 'STALE' : 'REACHABLE'}`).join('\n') + '\n10.181.44.13 dev wwan0 lladdr 11:22:33:44:55:66 REACHABLE\n192.168.1.77 dev br-lan lladdr 7a:11:22:33:44:55 STALE', fdb_ok: true, fdb: Object.entries(clients).filter(([, c]) => c.wired && c.name !== 'nas').map(([m]) => m).join('\n') }];
 	case 'home-ui.modem_status': if (process.env.SIMPLE_MODEM) return [0, { simple: { carrier: 'Example Mobile', state: 'connected', tech: 'lte', quality: 64, registration: 'home', lte: { rsrp: -95, rsrq: -11, sinr: 12.4 }, ip: '10.20.30.40', imei: '350000000000001', model: 'EM7455' } }];
 		/* falls through */
 	case 'home-ui.modem_status__mm': return [0, {

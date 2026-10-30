@@ -1,0 +1,136 @@
+#!/bin/sh
+# Router Home: reset the network settings to OpenWrt's defaults, but keep
+# WiFi (names, passwords), the admin password, installed apps, Router Home
+# and the router's name. Optionally keep the internet connection settings.
+#   soft-reset [keep_uplink 0|1]
+# Reset: network (LAN 192.168.1.1), DHCP/DNS, firewall, WiFi radios, SSH and
+# web server settings; VPNs and DNS apps that take over name lookups are
+# switched off. What was there before is kept as an undo point
+# (/etc/home-ui/good/undo, "goodconf undo").
+KEEP_UPLINK="${1:-1}"
+CFG=${CFG_DIR:-/etc/config}
+ROM=${ROM_DIR:-/rom}
+INITD=${INITD:-/etc/init.d}
+GEN=${GEN:-/bin/config_generate}
+WIFI=${WIFI:-/sbin/wifi}
+OLD=/tmp/home-ui-softreset.old
+G=${GOOD_DIR:-/etc/home-ui/good}
+log() { logger -t home-ui "reset settings: $*"; }
+
+rm -rf "$OLD"; mkdir -p "$OLD" "$G"
+cp -p "$CFG"/* "$OLD"/ 2>/dev/null
+# undo point (same place "Go back" uses)
+rm -rf "$G/undo"; mkdir -p "$G/undo"; cp -p "$CFG"/* "$G/undo"/ 2>/dev/null
+echo "$(date '+%F %T') before “Reset settings”" > "$G/undo/meta"
+
+u() { uci -q -c "$OLD" "$@"; }	# read the old settings
+
+# ---------- what to carry over ----------
+# WiFi access points on the home network, per radio: first one wins
+APS=""
+for i in $(u show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
+	[ "$(u get wireless.$i.mode)" = ap ] || continue
+	u get wireless.$i.network | tr ' ' '\n' | grep -qx lan || continue
+	[ "$(u get wireless.$i.disabled)" = 1 ] && continue
+	APS="$APS $i"
+done
+# internet connections: interfaces in the old wan zone (not VPNs)
+UPS=""
+if [ "$KEEP_UPLINK" = 1 ]; then
+	for z in $(u show firewall | sed -n "s/^firewall\.\([^.=]*\)=zone$/\1/p"); do
+		[ "$(u get firewall.$z.name)" = wan ] || continue
+		for n in $(u get firewall.$z.network); do
+			p="$(u get network.$n.proto)"
+			case "$p" in ''|wireguard|openvpn|tailscale) continue ;; esac
+			UPS="$UPS $n"
+		done
+	done
+fi
+
+# ---------- reset ----------
+for f in dhcp firewall dropbear uhttpd; do
+	[ -f "$ROM/etc/config/$f" ] && cp "$ROM/etc/config/$f" "$CFG/$f"
+done
+# device names and fixed addresses (only those that fit 192.168.1.x)
+for h in $(u show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=host$/\1/p"); do
+	ip="$(u get dhcp.$h.ip)"
+	case "$ip" in ''|192.168.1.*) ;; *) ip="" ; [ -n "$(u get dhcp.$h.name)" ] || continue ;; esac
+	n="$(uci add dhcp host)"
+	for k in name mac dns leasetime; do v="$(u get dhcp.$h.$k)"; [ -n "$v" ] && uci set dhcp.$n.$k="$v"; done
+	[ -n "$ip" ] && uci set dhcp.$n.ip="$ip"
+done
+rm -f "$CFG/network" "$CFG/wireless"
+rm -rf /tmp/.uci/* 2>/dev/null
+"$GEN" >/dev/null 2>&1
+"$WIFI" config >/dev/null 2>&1
+[ -f "$CFG/wireless" ] || touch "$CFG/wireless"
+
+# keep the WAN port's device names from the new defaults, but bring back
+# the old internet connection settings
+for n in $UPS; do
+	uci -q delete network.$n
+	uci set network.$n=interface
+	u show network.$n | sed -n "s/^network\.$n\.\([^=]*\)=\(.*\)$/\1 \2/p" | while read -r k v; do
+		eval "set -- $v"
+		if [ $# -gt 1 ]; then for x in "$@"; do uci add_list network.$n.$k="$x"; done
+		else uci set network.$n.$k="$1"; fi
+	done
+	uci -q delete network.$n.peerdns; uci -q delete network.$n.dns
+	# a WiFi uplink: its client section too
+	for i in $(u show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
+		[ "$(u get wireless.$i.mode)" = sta ] && [ "$(u get wireless.$i.network)" = "$n" ] || continue
+		uci set wireless.$i=wifi-iface
+		for k in device mode network ssid bssid encryption key ieee80211w; do v="$(u get wireless.$i.$k)"; [ -n "$v" ] && uci set wireless.$i.$k="$v"; done
+		uci set wireless.$i.disabled=0
+		d="$(u get wireless.$i.device)"; [ -n "$(uci -q get wireless.$d)" ] && uci set wireless.$d.disabled=0
+	done
+	wz="$(uci show firewall | sed -n "s/^firewall\.\([^.=]*\)\.name='wan'$/\1/p" | head -n1)"
+	[ -n "$wz" ] && { uci get firewall.$wz.network | tr ' ' '\n' | grep -qx "$n" || uci add_list firewall.$wz.network="$n"; }
+done
+
+# WiFi: radios on as before, the same names and passwords on the home network
+DONE_RADIOS=" "
+for i in $APS; do
+	r="$(u get wireless.$i.device)"
+	[ -n "$(uci -q get wireless.$r)" ] || continue
+	case "$DONE_RADIOS" in *" $r "*) ;; *)
+		DONE_RADIOS="$DONE_RADIOS$r "
+		uci set wireless.$r.disabled=0
+		for k in country channel htmode txpower; do v="$(u get wireless.$r.$k)"; [ -n "$v" ] && uci set wireless.$r.$k="$v"; done
+		# drop the generated "OpenWrt" network on this radio
+		for t in $(uci show wireless | sed -n "s/^wireless\.\([^.]*\)\.device='$r'$/\1/p"); do
+			[ "$(uci -q get wireless.$t.mode)" = ap ] && uci -q delete wireless.$t
+		done ;;
+	esac
+	uci set wireless.$i=wifi-iface
+	uci set wireless.$i.device="$r"; uci set wireless.$i.mode=ap; uci set wireless.$i.network=lan
+	for k in ssid encryption key ieee80211w hidden sae_password ocv; do v="$(u get wireless.$i.$k)"; [ -n "$v" ] && uci set wireless.$i.$k="$v"; done
+done
+
+# no open "OpenWrt" network on a radio that is on (for example one only
+# used to reach the internet over WiFi)
+for t in $(uci show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
+	[ "$(uci -q get wireless.$t.mode)" = ap ] && [ "$(uci -q get wireless.$t.encryption)" = none ] && [ "$(uci -q get wireless.$t.ssid)" = OpenWrt ] || continue
+	[ "$(uci -q get wireless.$(uci -q get wireless.$t.device).disabled)" = 1 ] || uci -q delete wireless.$t
+done
+
+# apps that take over name lookups or traffic: off
+for s in adguardhome AdGuardHome https-dns-proxy; do
+	[ -x $INITD/$s ] && { $INITD/$s stop; $INITD/$s disable; } >/dev/null 2>&1
+done
+[ -n "$(uci -q get protonvpn.main)" ] && { uci set protonvpn.main.enabled=0; $INITD/protonvpn stop >/dev/null 2>&1; }
+[ -n "$(uci -q get upnpd.config)" ] && uci set upnpd.config.enabled=0
+
+uci commit
+log "network, DHCP/DNS, firewall and WiFi reset to defaults (kept: WiFi names/passwords${UPS:+, internet connection$UPS})"
+
+# ---------- apply ----------
+sleep 2
+$INITD/network restart >/dev/null 2>&1
+$INITD/firewall restart >/dev/null 2>&1
+$INITD/dnsmasq restart >/dev/null 2>&1
+$INITD/odhcpd restart >/dev/null 2>&1
+$INITD/dropbear restart >/dev/null 2>&1
+$INITD/uhttpd restart >/dev/null 2>&1
+"$WIFI" reload >/dev/null 2>&1
+exit 0

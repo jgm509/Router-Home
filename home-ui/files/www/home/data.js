@@ -106,7 +106,8 @@ const Data = (() => {
 			const mac = m[3].toLowerCase();
 			const e = out[mac] || (out[mac] = { ips: [], ip6s: [], state: 'STALE' });
 			(m[1].includes(':') ? e.ip6s : e.ips).push(m[1]);
-			if (!/FAILED|INCOMPLETE/.test(m[4])) e.state = 'REACHABLE';
+			/* STALE entries linger for minutes after a device leaves */
+			if (/REACHABLE|DELAY|PROBE|PERMANENT/.test(m[4])) e.state = 'REACHABLE';
 		}
 		return out;
 	}
@@ -146,13 +147,17 @@ const Data = (() => {
 			}
 		}
 		const nb = parseNeigh(neigh && neigh.neigh, lanDevs);
+		const wiredMacs = neigh && neigh.fdb_ok ? new Set((neigh.fdb || '').split(/\s+/).filter(Boolean).map(m => m.toLowerCase())) : null;
 		for (const mac in nb) {
 			const d = devs[mac] || (lanDevs.length ? get(mac) : null);
 			if (!d) continue;
 			for (const ip of nb[mac].ips) if (!d.ips.includes(ip)) d.ips.push(ip);
 			for (const ip of nb[mac].ip6s) if (!d.ip6s.includes(ip)) d.ip6s.push(ip);
-			if (nb[mac].state === 'REACHABLE') d.online = true;
+			/* with the bridge table, a device without WiFi only counts as
+			 * connected when it is seen on a cable port */
+			if (nb[mac].state === 'REACHABLE' && !wiredMacs) d.online = true;
 		}
+		if (wiredMacs) for (const mac of wiredMacs) { const d = devs[mac]; if (d) d.online = true; }
 		/* only show hints for devices we already know are on the LAN */
 		for (const mac in hints || {}) {
 			const d = devs[mac.toLowerCase()];

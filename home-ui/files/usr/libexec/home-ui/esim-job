@@ -26,8 +26,39 @@ finish() {	# $1 = state, $2 = lpa json line or error text
 }
 
 # last {"type":"lpa",...} line from lpac
+# restart the SIM card inside the modem (clears an eSIM that stays busy after
+# a change; otherwise only a router restart does). Uses qmicli through MBIM.
+sim_reset() {
+	command -v qmicli >/dev/null 2>&1 || return 1
+	local d
+	for d in /dev/wwan0mbim0 /dev/cdc-wdm0; do
+		[ -e "$d" ] || continue
+		timeout 15 qmicli -p -d "$d" --device-open-mbim --uim-sim-power-off=1 >/dev/null 2>&1 || continue
+		sleep 2
+		timeout 15 qmicli -p -d "$d" --device-open-mbim --uim-sim-power-on=1 >/dev/null 2>&1
+		return 0
+	done
+	return 1
+}
+
+# "euicc_init" means lpac couldn't open its channel to the eSIM yet (the
+# modem is still busy after ModemManager stopped, or an old channel is still
+# open): wait a moment and try again
 lpa() {
-	"$LPAC" "$@" 2>/dev/null | grep '"type":"lpa"' | tail -n 1
+	local r i=0
+	while :; do
+		r="$("$LPAC" "$@" 2>/dev/null | grep '"type":"lpa"' | tail -n 1)"
+		echo "$r" | grep -q 'euicc_init' || break
+		i=$((i + 1)); [ $i -ge 5 ] && break
+		if [ $i = 3 ] && sim_reset; then
+			progress "The eSIM is still busy: restarting the SIM, then trying again"
+			sleep 8
+		else
+			progress "The eSIM is busy, trying again ($i)"
+			sleep 5
+		fi
+	done
+	echo "$r"
 }
 
 ok() { echo "$1" | grep -q '"code":0'; }
@@ -39,6 +70,8 @@ restart_mm() {
 
 progress "Pausing mobile data"
 [ -x /etc/init.d/modemmanager ] && /etc/init.d/modemmanager stop >/dev/null 2>&1
+# let ModemManager let go of the modem completely
+for i in 1 2 3 4 5; do pidof ModemManager >/dev/null || break; sleep 1; done
 sleep 2
 
 case "$ACTION" in

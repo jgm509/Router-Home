@@ -1,0 +1,2 @@
+# Router Home: see /usr/libexec/home-ui/sta160
+[ "$ACTION" = ifup ] && [ -n "$DEVICE" ] && [ -x /usr/libexec/home-ui/sta160 ] && /usr/libexec/home-ui/sta160 "$DEVICE"

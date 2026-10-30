@@ -1,7 +1,7 @@
 {
 	"admin/home-ui": {
 		"title": "Simple mode",
-		"order": 5,
+		"order": 998,
 		"action": {
 			"type": "view",
 			"path": "home-ui/open"

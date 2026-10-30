@@ -1,0 +1,307 @@
+#!/bin/sh
+# Router Home: Thread and Bluetooth LE on the Silicon Labs EFR32MG21 radio of
+# the Askey SBE1V1K / EBE1V1K / CBE1V1K (UART3 = /dev/ttyMSM2).
+#
+# The radio runs Silicon Labs multiprotocol firmware; talking to it needs
+# Silicon Labs' cpcd, otbr-agent (with CPC) and cpc_hci_bridge. Router Home
+# doesn't ship them: the user installs their own kit (iotkit.tar.gz with
+# bin/, lib/, firmware/), kept in $KIT through firmware updates.
+#
+#   iot info                          JSON status
+#   iot install <tar.gz> | remove     the kit
+#   iot pair                          new pairing key (job)
+#   iot apply                         (re)start or stop as configured
+#   iot thread-form <name> | thread-join <hex> | thread-leave
+#   iot thread-dataset | thread-scan
+#   iot ble-scan | ble-adv <on|off>
+#   iot run-cpcd | run-otbr | run-ble  (used by /etc/init.d/home-ui-iot)
+KIT=${KIT:-/usr/lib/iotkit}
+ETC=/etc/home-ui/iot
+RUN=/tmp/home-ui
+TTY=/dev/ttyMSM2
+mkdir -p "$RUN" "$ETC"
+# programs: your own kit (bin/ + lib/) if installed, otherwise the
+# open-source-built packages (cpcd, otbr-cpc, cpc-hci-bridge, bluez-utils)
+if [ -x "$KIT/bin/cpcd" ]; then
+	export LD_LIBRARY_PATH="$KIT/lib"
+	pick() { [ -x "$KIT/bin/$1" ] && echo "$KIT/bin/$1" || command -v "$1"; }
+	SRC=kit
+else
+	pick() { command -v "$1"; }
+	SRC=packages
+fi
+CPCD=$(pick cpcd); OTBR=$(pick otbr-agent); OTCTL=$(pick ot-ctl); BRIDGE=$(pick cpc_hci_bridge)
+BTATTACH=$(pick btattach); HCICONFIG=$(pick hciconfig); BTMGMT=$(pick btmgmt)
+
+esc() { printf '%s' "$1" | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/," "); gsub(/\r/,""); gsub(/[\001-\037]/,""); if (NR>1) printf "\\n"; print}'; }
+cfg() { uci -q get home-ui-iot.main."$1"; }
+otc() { [ -n "$OTCTL" ] || return 1; timeout 10 "$OTCTL" "$@" 2>/dev/null | sed '/^Done$/d'; }
+installed() { [ -n "$CPCD" ] && [ -n "$OTBR" ] && [ -n "$OTCTL" ]; }
+supported() {
+	[ -e "$TTY" ] || return 1
+	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in askey,sbe1v1k|askey,ebe1v1k|askey,cbe1v1k) return 0 ;; esac
+	return 1
+}
+
+gpio() {	# gpio <line> <0|1>
+	local c base=""
+	for c in /sys/class/gpio/gpiochip*; do
+		[ "$(cat $c/label 2>/dev/null)" = "1000000.pinctrl" ] && base=$(cat $c/base)
+	done
+	if [ -n "$base" ] && [ -w /sys/class/gpio/export ]; then
+		local n=$((base + $1))
+		[ -d /sys/class/gpio/gpio$n ] || echo $n > /sys/class/gpio/export 2>/dev/null
+		echo out > /sys/class/gpio/gpio$n/direction 2>/dev/null
+		echo $2 > /sys/class/gpio/gpio$n/value && return 0
+	fi
+	command -v gpioset >/dev/null || return 1
+	gpioset -t 0 -c gpiochip0 $1=$2 2>/dev/null || gpioset gpiochip0 $1=$2
+}
+# BLE advertising with the router's name in the advert itself (not only in
+# the scan response), so routers and scanners that listen passively see it
+adv_start() {
+	local N hex
+	N=$(uci -q get system.@system[0].hostname || echo Router); N=$(printf %s "$N" | tr -cd 'A-Za-z0-9 ._-' | cut -c1-26)
+	hex=$(printf %s "$N" | od -An -tx1 | tr -d ' \n')
+	for c in "power off" "le on" "bredr off" "name $N" "connectable on" "power on" "advertising off" "rm-adv 1"; do "$BTMGMT" -i hci0 $c >/dev/null 2>&1; done
+	"$BTMGMT" -i hci0 add-adv -c -g -d "$(printf '%02x09' $(( ${#hex} / 2 + 1 )))$hex" 1 >/dev/null 2>&1 ||
+		"$BTMGMT" -i hci0 advertising on >/dev/null 2>&1
+}
+adv_stop() { "$BTMGMT" -i hci0 rm-adv 1 >/dev/null 2>&1; "$BTMGMT" -i hci0 advertising off >/dev/null 2>&1; }
+reset_radio() { gpio 64 1; gpio 42 0; sleep 1; gpio 42 1; sleep 2; }
+
+conf() {	# conf <encrypt 0|1>
+	cat > "$ETC/cpcd.conf" <<EOC
+instance_name: cpcd_0
+bus_type: UART
+uart_device_file: $TTY
+uart_device_baud: 921600
+uart_hardflow: true
+bootloader_recovery_pins_enabled: false
+stdout_trace: false
+trace_to_file: false
+enable_frame_trace: false
+rlimit_nofile: 2000
+disable_encryption: $([ "$1" = 1 ] && echo false || echo true)
+binding_key_file: $ETC/binding.key
+EOC
+}
+cpcd_once() { timeout 25 "$CPCD" -c "$ETC/cpcd.conf" "$@" > "$RUN/iot-cpcd-once.log" 2>&1; cat "$RUN/iot-cpcd-once.log"; }
+paired() { [ -s "$ETC/binding.key" ] || [ -e "$ETC/noencrypt" ]; }
+
+firewall_zone() {
+	uci -q get firewall.home_ui_thread >/dev/null && return
+	uci -q batch <<-EOF
+	set firewall.home_ui_thread=zone
+	set firewall.home_ui_thread.name='thread'
+	add_list firewall.home_ui_thread.device='wpan0'
+	set firewall.home_ui_thread.input='ACCEPT'
+	set firewall.home_ui_thread.output='ACCEPT'
+	set firewall.home_ui_thread.forward='ACCEPT'
+	set firewall.home_ui_thread_lan=forwarding
+	set firewall.home_ui_thread_lan.src='lan'
+	set firewall.home_ui_thread_lan.dest='thread'
+	set firewall.home_ui_lan_thread=forwarding
+	set firewall.home_ui_lan_thread.src='thread'
+	set firewall.home_ui_lan_thread.dest='lan'
+	commit firewall
+	EOF
+	/etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+case "$1" in
+info)
+	sup=false; supported && sup=true
+	ins=false; installed && ins=true
+	pr=false; paired && pr=true
+	c=false; pidof cpcd >/dev/null && c=true
+	o=false; pidof otbr-agent >/dev/null && o=true
+	th=""; bl=""
+	# a child only talks to its parent, so its neighbour table is empty
+	nb() { if [ "$st" = child ]; then otc parent | grep -q "Ext Addr" && echo 1 || echo 0; else otc neighbor list | head -n1 | wc -w; fi; }
+	if [ $o = true ]; then
+		st="$(otc state | head -n1)"
+		th="$(printf '"state":"%s","name":"%s","channel":"%s","panid":"%s","extpanid":"%s","neighbors":%s,"address":"%s","rcp":"%s"' \
+			"$(esc "$st")" "$(esc "$(otc networkname | head -n1)")" "$(otc channel | head -n1)" "$(otc panid | head -n1)" \
+			"$(otc extpanid | head -n1)" "$(nb)" "$(otc ipaddr mleid | head -n1)" "$(esc "$(otc rcp version | head -n1)")")"
+	fi
+	if [ -n "$HCICONFIG" ] && "$HCICONFIG" hci0 >/dev/null 2>&1; then
+		h="$("$HCICONFIG" hci0)"
+		up=false; echo "$h" | grep -q "UP RUNNING" && up=true
+		adv=false; [ -e "$RUN/iot-adv" ] && adv=true
+		bl="$(printf '"up":%s,"address":"%s","advertising":%s' "$up" "$(echo "$h" | sed -n 's/.*BD Address: \([0-9A-F:]*\).*/\1/p')" "$adv")"
+	fi
+	pk=false; PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v otbr-agent >/dev/null && [ -x /usr/bin/cpcd ] && pk=true
+	printf '{"source":"%s","packages":%s,"bluetooth_tools":%s,"supported":%s,"board":"%s","tty":%s,"installed":%s,"paired":%s,"enabled":%s,"ble_enabled":%s,"cpcd":%s,"otbr":%s,"thread":{%s},"ble":{%s},"bluetooth_kmod":%s,"tun":%s}\n' \
+		"$SRC" "$pk" "$([ -n "$BRIDGE" ] && [ -n "$BTATTACH" ] && [ -n "$BTMGMT" ] && echo true || echo false)" "$sup" "$(cat /tmp/sysinfo/board_name 2>/dev/null)" "$([ -e "$TTY" ] && echo true || echo false)" "$ins" "$pr" \
+		"$([ "$(cfg enabled)" = 1 ] && echo true || echo false)" "$([ "$(cfg ble)" = 1 ] && echo true || echo false)" "$c" "$o" "$th" "$bl" \
+		"$( (modinfo hci_uart >/dev/null 2>&1 || [ -d /sys/module/hci_uart ]) && echo true || echo false)" \
+		"$( ([ -e /dev/net/tun ] || modinfo tun >/dev/null 2>&1) && echo true || echo false)"
+	;;
+install)
+	f="$2"; [ -f "$f" ] || { echo '{"error":"Upload the file first"}'; exit 0; }
+	tmp="$RUN/iotx"; rm -rf "$tmp"; mkdir -p "$tmp"
+	tar -xzf "$f" -C "$tmp" 2>/dev/null || { echo '{"error":"Not a .tar.gz file"}'; rm -rf "$tmp" "$f"; exit 0; }
+	src="$(find "$tmp" -type f -name cpcd -path '*/bin/*' | head -n1)"
+	[ -n "$src" ] || { echo '{"error":"bin/cpcd is not in this file"}'; rm -rf "$tmp" "$f"; exit 0; }
+	base="$(dirname "$(dirname "$src")")"
+	for x in otbr-agent ot-ctl; do [ -f "$base/bin/$x" ] || { echo "{\"error\":\"bin/$x is missing\"}"; rm -rf "$tmp" "$f"; exit 0; }; done
+	bad="$(find "$base" -type l | while read -r l; do case "$(readlink "$l")" in /*|*..*) echo "$l" ;; esac; done)"
+	[ -z "$bad" ] || { echo '{"error":"The file contains unsafe links"}'; rm -rf "$tmp" "$f"; exit 0; }
+	/etc/init.d/home-ui-iot stop >/dev/null 2>&1
+	rm -rf "$KIT"; mkdir -p "$KIT"
+	for d in bin lib firmware; do [ -d "$base/$d" ] && cp -a "$base/$d" "$KIT/"; done
+	chmod 755 "$KIT/bin/"*
+	mkdir -p /lib/upgrade/keep.d; printf '%s/\n%s/\n' "$KIT" "$ETC" > /lib/upgrade/keep.d/home-ui-iot
+	# ot-ctl on the command line, for your own checks
+	if ! command -v ot-ctl >/dev/null || grep -qs "home-ui iot wrapper" /usr/sbin/ot-ctl; then
+		printf '#!/bin/sh\n# home-ui iot wrapper\nLD_LIBRARY_PATH=%s/lib exec %s/bin/ot-ctl "$@"\n' "$KIT" "$KIT" > /usr/sbin/ot-ctl; chmod 755 /usr/sbin/ot-ctl
+	fi
+	# the pairing key of the test kit, if there is one
+	[ -s /etc/iotkit/binding.key ] && [ ! -s "$ETC/binding.key" ] && cp /etc/iotkit/binding.key "$ETC/binding.key" && chmod 600 "$ETC/binding.key"
+	rm -rf "$tmp" "$f"
+	logger -t home-ui "Thread/Bluetooth kit installed in $KIT"
+	echo '{"ok":true}'
+	;;
+remove)
+	/etc/init.d/home-ui-iot stop >/dev/null 2>&1
+	uci -q set home-ui-iot.main.enabled=0; uci -q commit home-ui-iot
+	rm -rf "$KIT"
+	grep -qs "home-ui iot wrapper" /usr/sbin/ot-ctl && rm -f /usr/sbin/ot-ctl
+	mkdir -p /lib/upgrade/keep.d; echo "$ETC/" > /lib/upgrade/keep.d/home-ui-iot
+	echo '{"ok":true}'
+	;;
+pair)	# run as a job: writes $RUN/iotpair.json
+	out() { printf '{"state":"%s","message":"%s"}\n' "$1" "$(esc "$2")" > "$RUN/iotpair.$3"; }
+	installed || { out failed "Install the kit first" json; exit 0; }
+	/etc/init.d/home-ui-iot stop >/dev/null 2>&1; killall cpcd otbr-agent cpc_hci_bridge btattach 2>/dev/null; sleep 1
+	out running "Removing the old pairing…" progress
+	conf 1; reset_radio
+	u="$(cpcd_once -u)"
+	reset_radio
+	out running "Making a new pairing key…" progress
+	rm -f "$ETC/binding.key" "$ETC/noencrypt"
+	cpcd_once -b ecdh >/dev/null
+	mkdir -p /lib/upgrade/keep.d; grep -qs "$ETC/" /lib/upgrade/keep.d/home-ui-iot || echo "$ETC/" >> /lib/upgrade/keep.d/home-ui-iot
+	if [ -s "$ETC/binding.key" ]; then
+		chmod 600 "$ETC/binding.key"; out done "Paired" json
+	else
+		conf 0; reset_radio
+		if cpcd_once -p | grep -q "Secondary CPC v"; then touch "$ETC/noencrypt"; out done "Connected without encryption" json
+		elif echo "$u" | grep -qi "refused\|not.*implemented"; then out failed "The radio refused to unpair. See $RUN/iot-cpcd-once.log" json
+		else out failed "Pairing failed. See $RUN/iot-cpcd-once.log" json; fi
+	fi
+	rm -f "$RUN/iotpair.progress"
+	[ "$(cfg enabled)" = 1 ] && /etc/init.d/home-ui-iot start >/dev/null 2>&1
+	;;
+apply)
+	if [ "$(cfg enabled)" = 1 ] && installed && paired; then
+		firewall_zone
+		if [ "$SRC" = kit ] && { ! command -v ot-ctl >/dev/null || grep -qs "home-ui iot wrapper" /usr/sbin/ot-ctl; }; then
+			printf '#!/bin/sh\n# home-ui iot wrapper\nLD_LIBRARY_PATH=%s/lib exec %s/bin/ot-ctl "$@"\n' "$KIT" "$KIT" > /usr/sbin/ot-ctl; chmod 755 /usr/sbin/ot-ctl
+		fi
+		/etc/init.d/home-ui-iot enable; /etc/init.d/home-ui-iot restart
+	else
+		/etc/init.d/home-ui-iot stop; /etc/init.d/home-ui-iot disable
+	fi >/dev/null 2>&1
+	echo '{"ok":true}'
+	;;
+run-cpcd)
+	# another cpcd (for example the test kit's) already owns the radio:
+	# don't reset the radio under it, just wait and try again later
+	if pidof cpcd >/dev/null; then
+		logger -t home-ui-iot "another cpcd is running (test kit?); run 'iot stop' in the kit folder"
+		sleep 60; exit 1
+	fi
+	[ -e "$ETC/noencrypt" ] && conf 0 || conf 1
+	reset_radio
+	exec "$CPCD" -c "$ETC/cpcd.conf"
+	;;
+run-otbr)
+	# keep the Thread network (otbr stores it in /var/lib/thread) across restarts
+	mkdir -p "$ETC/thread" /var/lib
+	[ -L /var/lib/thread ] || { rm -rf /var/lib/thread; ln -s "$ETC/thread" /var/lib/thread; }
+	[ -e /dev/net/tun ] || modprobe tun 2>/dev/null
+	# wait for cpcd: it resets the radio and does the encrypted handshake
+	# before Thread can open its channel, which can take several seconds
+	for i in $(seq 1 60); do pidof cpcd >/dev/null && [ -S /dev/shm/cpcd/cpcd_0/ctrl.cpcd.sock ] && break; sleep 1; done
+	sleep 6
+	exec "$OTBR" -I wpan0 -B br-lan -d 3 'spinel+cpc://cpcd_0?iid=2'
+	;;
+run-ble)
+	modprobe bluetooth 2>/dev/null; modprobe hci_uart 2>/dev/null
+	[ -d /sys/module/hci_uart ] || { logger -t home-ui-iot "Bluetooth: kmod-hci-uart missing"; sleep 3600; exit 1; }
+	sleep 6
+	cd "$RUN" && rm -f pts_hci
+	"$BRIDGE" > "$RUN/iot-ble-bridge.log" 2>&1 &
+	bp=$!
+	for i in 1 2 3 4 5; do sleep 1; [ -e "$RUN/pts_hci" ] && break; done
+	P=$(readlink -f "$RUN/pts_hci" 2>/dev/null)
+	[ -n "$P" ] || P=$(sed -n "s/.*opened at '\(.*\)'.*/\1/p" "$RUN/iot-ble-bridge.log" | head -n1)
+	[ -n "$P" ] || { kill $bp; exit 1; }
+	trap 'kill $bp 2>/dev/null' EXIT INT TERM
+	( sleep 4; "$HCICONFIG" hci0 up; "$BTMGMT" -i hci0 power on; "$BTMGMT" -i hci0 le on ) >/dev/null 2>&1 &
+	"$BTATTACH" -B "$P" -P h4
+	;;
+thread-form)
+	n="${2:-RouterHome}"; case "$n" in *[!A-Za-z0-9_-]*|'') echo '{"error":"Use letters, numbers, - and _"}'; exit 0 ;; esac
+	old="$(otc networkkey | head -n1)"
+	# Forget the old network completely first: the stored network key
+	# (a key reference on these builds) is otherwise kept and reused.
+	otc factoryreset >/dev/null
+	for i in $(seq 1 30); do sleep 1; s="$(otc state | head -n1)"; [ -n "$s" ] && break; done
+	[ -n "$s" ] || { echo '{"error":"otbr-agent did not come back after the reset"}'; exit 0; }
+	r="$(otc thread stop; otc ifconfig down; otc dataset clear; otc dataset init new; otc dataset networkname "$n"; otc dataset commit active; otc ifconfig up; otc thread start)"
+	err="$(echo "$r" | grep -m1 '^Error')"
+	[ -n "$err" ] && { printf '{"error":"Thread refused: %s"}\n' "$(esc "$err")"; exit 0; }
+	new="$(otc networkkey | head -n1)"
+	[ -n "$old" ] && [ "$old" = "$new" ] && { echo '{"error":"The network key did not change. Try again, or restart the radio."}'; exit 0; }
+	echo '{"ok":true}'
+	;;
+thread-join)
+	d="$2"; case "$d" in ''|*[!0-9a-fA-F]*) echo '{"error":"The dataset is a long hexadecimal text"}'; exit 0 ;; esac
+	otc factoryreset >/dev/null
+	for i in $(seq 1 30); do sleep 1; [ -n "$(otc state | head -n1)" ] && break; done
+	otc thread stop >/dev/null; otc ifconfig down >/dev/null
+	otc dataset set active "$d" >/dev/null && otc ifconfig up >/dev/null && otc thread start >/dev/null || { echo '{"error":"Dataset refused"}'; exit 0; }
+	echo '{"ok":true}'
+	;;
+thread-leave) otc thread stop >/dev/null; otc ifconfig down >/dev/null; otc factoryreset >/dev/null; echo '{"ok":true}' ;;
+thread-dataset) printf '{"dataset":"%s"}\n' "$(otc dataset active -x | head -n1)" ;;
+thread-scan)
+	otc ifconfig up >/dev/null
+	printf '{"networks":['
+	otc scan | awk -F'|' 'NF>6 {for(i=2;i<=NF;i++) gsub(/^ +| +$/,"",$i)} NF>6 && $2 ~ /^[0-9]+$/ {printf "%s{\"name\":\"%s\",\"extpanid\":\"%s\",\"panid\":\"%s\",\"channel\":\"%s\",\"rssi\":\"%s\"}", (c++?",":""), $3, $4, $5, $7, $8}'
+	printf ']}\n'
+	;;
+ble-scan)
+	"$HCICONFIG" hci0 >/dev/null 2>&1 || { echo '{"error":"Bluetooth is off"}'; exit 0; }
+	# pause our own advertising while scanning: the radio then scans
+	# actively and gets the scan responses that carry most device names
+	[ -e "$RUN/iot-adv" ] && adv_stop
+	printf '{"devices":['
+	timeout 10 "$BTMGMT" -i hci0 find -l 2>/dev/null | awk '
+		# a device is often reported several times (advert, then scan
+		# response with its name): keep the strongest signal and any name
+		/dev_found:/ {
+			a=$3; for (i=4;i<NF;i++) if ($i=="rssi") { r=$(i+1)+0; if (!(a in rs) || r>rs[a]) rs[a]=r }
+			if (!(a in rs)) rs[a]=0
+			if (!(a in seen)) { seen[a]=1; ord[++k]=a }
+			next
+		}
+		/^[ \t]*name / && a!="" { x=$0; sub(/^[ \t]*name /,"",x); gsub(/["\\]/,"",x); if (x!="") nm[a]=x }
+		END { for (j=1;j<=k;j++) { a=ord[j]; printf "%s{\"address\":\"%s\",\"rssi\":%d,\"name\":\"%s\"}", (j>1?",":""), a, rs[a], nm[a] } }'
+	printf ']}\n'
+	[ -e "$RUN/iot-adv" ] && adv_start
+	;;
+ble-adv)
+	"$HCICONFIG" hci0 >/dev/null 2>&1 || { echo '{"error":"Bluetooth is off"}'; exit 0; }
+	if [ "$2" = on ]; then
+		adv_start; touch "$RUN/iot-adv"
+	else
+		adv_stop; rm -f "$RUN/iot-adv"
+	fi
+	echo '{"ok":true}'
+	;;
+*) sed -n '2,18p' "$0"; exit 1 ;;
+esac

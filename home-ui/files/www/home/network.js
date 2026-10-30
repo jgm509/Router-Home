@@ -62,12 +62,18 @@ App.register('network', {
 		if (sub === 'dns') return renderDns(page);
 		if (sub === 'vpn') return renderVpn(page);
 		if (sub === 'usage') return renderUsage(page);
+		if (sub === 'lans') return Lans.render(page);
+		if (sub === 'check') return Diag.render(page);
+		if (sub === 'adguard') return Agh.render(page, args);
+		if (sub === 'firewall') return Firewall.render(page);
+		if (sub === 'security') return Firewall.renderSecurity(page);
 		return renderOverview(page);
 	}
 });
 
 function backLink(label) {
-	return App.h('a', { href: '#/network', class: 'hint', style: { display: 'inline-flex', alignItems: 'center', gap: '4px', margin: '0 0 4px', textDecoration: 'none', color: 'var(--accent)', fontWeight: 600 } }, App.icon('back'), label || 'Internet');
+	const [bh, bl] = App.backTo('#/network', label || 'Interfaces');
+	return App.h('a', { href: bh, class: 'hint back-link', style: { display: 'inline-flex', alignItems: 'center', gap: '4px', margin: '0 0 4px', textDecoration: 'none', color: 'var(--accent)', fontWeight: 600 } }, App.icon('back'), bl);
 }
 
 /* ======================= overview ======================= */
@@ -77,12 +83,17 @@ async function renderOverview(page) {
 	const conns = h('div', h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }));
 	const more = [
 		info.modem ? row({ icon: 'sim', label: 'Mobile & eSIM', sub: 'Signal, carrier, APN and eSIM profiles', href: '#/network/mobile' }) : null,
+		row({ icon: 'refresh', label: 'Connection check', sub: 'Find out why the internet doesn\'t work; go back to working settings', href: '#/network/check' }),
 		row({ icon: 'download', label: 'Data usage', sub: 'Per connection and per device', href: '#/network/usage' }),
+		info.adguard ? row({ icon: 'shield', label: 'AdGuard Home', sub: 'Block ads, sites and services; log, lists, per-device rules', href: '#/network/adguard' }) : null,
 		row({ icon: 'dns', label: 'DNS', sub: 'Choose who answers website name lookups', href: '#/network/dns' }),
-		row({ icon: 'vpn', label: 'VPN', sub: App.info.protonvpn ? 'Proton VPN, WireGuard and Tailscale' : 'WireGuard and Tailscale', href: '#/network/vpn' })
+		row({ icon: 'vpn', label: 'VPN', sub: App.info.protonvpn ? 'Proton VPN, WireGuard and Tailscale' : 'WireGuard and Tailscale', href: '#/network/vpn' }),
+		row({ icon: 'wifi', label: 'Networks', sub: 'Guest and smart-home networks with their own WiFi', href: '#/network/lans' }),
+		row({ icon: 'shield', label: 'Firewall', sub: 'Port forwarding, rules, zones and UPnP', href: '#/network/firewall' }),
+		row({ icon: 'lock', label: 'Security check', sub: 'Find risky settings and fix them', href: '#/network/security' })
 	];
 	page.append(
-		h('h1', { class: 'page-title' }, 'Internet'),
+		h('h1', { class: 'page-title' }, 'Interfaces'),
 		sectionTitle('Connections', h('a', { class: 'link', href: '#', onclick: e => { e.preventDefault(); openAddConnection(load); } }, 'Add connection')),
 		conns,
 		hint('When more than one connection is online, the one marked “In use” carries your traffic. The others take over if it fails.'),
@@ -179,7 +190,10 @@ function openInterface(i, cfg, reload) {
 			h('div', { class: 'btn-row' }, restart, name !== 'lan' ? stopStart : null),
 			p === 'wireguard' ? note(h('span', 'Peers and keys for this VPN are on the ', h('a', { href: '#/network/vpn' }, 'VPN page'), '.')) : null,
 			editor.node ? [sectionTitle('Settings'), editor.node] : null,
-			name !== 'lan' && name !== 'loopback' && p !== 'wireguard' ? [sectionTitle('Priority'), h('div', { class: 'group' }, field('Use this connection as', metric)),
+			name !== 'lan' && name !== 'loopback' && p !== 'wireguard' ? [sectionTitle(['Priority', App.explain('Priority',
+				'When the router has more than one internet connection (cable, mobile, WiFi uplink), the one with the highest priority carries your traffic.',
+				'The others stay connected in the background and take over by themselves if the main one stops working, then hand back when it comes back.',
+				{ rec: 'Make your fastest unlimited connection the main one and mobile data the backup.' })]), h('div', { class: 'group' }, field('Use this connection as', metric)),
 				hint('Lower priority connections wait in the background and take over when the main one stops working.')] : null,
 			editor.node || name !== 'lan' ? h('div', { class: 'actions' }, btn('Cancel', close, 'secondary'), saveBtn) : null,
 			del ? h('div', { class: 'btn-row', style: { justifyContent: 'center' } }, del) : null);
@@ -362,7 +376,7 @@ async function openWifiUplink(reload, existing) {
 			} else {
 				n = Net.freeName(netcfg, 'wwan');
 				await uci.add('network', 'interface', { proto: 'dhcp', metric: metric.value }, n);
-				await uci.add('wireless', 'wifi-iface', Object.assign(w, { network: n }));
+				await uci.addWifi(Object.assign(w, { network: n }));
 				await Net.addToZone('wan', n);
 			}
 			/* the radio must be on for the router to join */
@@ -393,7 +407,7 @@ async function renderUsage(page) {
 	async function load() {
 		const [u, ifaces, netcfg] = await Promise.all([call('home-ui', 'data_usage', { period }), Data.interfaces(), uci.load('network')]);
 		if (!clients) clients = await Data.clients().catch(() => []);
-		if (!u) { body.replaceChildren(note('Could not read the counters. Restart rpcd after updating Router Home.', 'warn')); return; }
+		if (!u) { body.replaceChildren(note('The router didn\'t answer with the counters. Go back and open it again; if it keeps happening, restart the router once (System settings → Restart).', 'warn')); return; }
 		const kids = [];
 
 		/* ---- connections ---- */
@@ -421,7 +435,7 @@ async function renderUsage(page) {
 				value: fmt.bytes((month ? month.rx + month.tx : down + up)) }));
 		}
 		kids.push(sectionTitle('Connections'), rows.length ? group(...rows) : h('div', { class: 'group' }, h('div', { class: 'empty' }, 'No counters yet.')),
-			hint(Object.keys(vn).length ? 'Monthly totals from vnstat.' : `Since the router started ${fmt.duration(u.uptime)} ago. Install vnstat to keep monthly totals across restarts.`));
+			hint(Object.keys(vn).length ? 'Monthly totals from vnstat.' : u.vnstat_state === 'starting' ? `Since the router started ${fmt.duration(u.uptime)} ago. vnStat is installed and has started counting; its monthly totals show here after about 5 minutes.` : `Since the router started ${fmt.duration(u.uptime)} ago. Install vnstat to keep monthly totals across restarts.`));
 
 		/* ---- devices ---- */
 		kids.push(sectionTitle('Devices'));
@@ -467,7 +481,13 @@ async function renderMobile(page) {
 	const status = h('div', h('div', { class: 'skeleton' }));
 	const settings = h('div');
 	const esim = h('div', h('div', { class: 'skeleton' }));
-	page.append(backLink(), h('h1', { class: 'page-title' }, 'Mobile & eSIM'), status, sectionTitle('Connection'), settings,
+	const toolsBox = h('div');
+	/* shown whenever ModemManager runs, even while the modem is briefly away (eSIM change, restart) */
+	if (info.modemmanager && !info.modem_addon && typeof Modem !== 'undefined') { toolsBox.append(Modem.tools()); toolsBox.lastRefresh = Date.now(); }
+	page.append(backLink(), h('h1', { class: 'page-title' }, 'Mobile & eSIM'), status, sectionTitle(['Connection', App.explain('Mobile connection',
+		'The APN is the name of your carrier\'s data gateway. Most SIMs work with the carrier\'s standard APN; a wrong APN connects to the network but gives no internet.',
+		'IP type: IPv4v6 gets both kinds of address and works with most carriers.',
+		{ rec: 'Use the APN from your carrier\'s website, and IPv4v6.' })]), settings, toolsBox,
 		sectionTitle('eSIM profiles', info.lpac ? h('a', { class: 'link', href: '#', onclick: e => { e.preventDefault(); openAddProfile(refreshEsim); } }, 'Add profile') : null), esim);
 
 	let showIds = false;
@@ -480,21 +500,26 @@ async function renderMobile(page) {
 				h('div', { class: 'btn-row' }, restartMM()));
 			return;
 		}
+		/* the tools' summaries (bands, messages) catch up once the modem is back, e.g. after an eSIM change */
+		if (toolsBox.firstChild && toolsBox.firstChild.refresh && Date.now() - (toolsBox.lastRefresh || 0) > 60000) { toolsBox.lastRefresh = Date.now(); toolsBox.firstChild.refresh(); }
 		const g = mm.generic || {}, op = mm['3gpp'] || {};
 		const sig = (m.signal && m.signal.modem && m.signal.modem.signal) || {};
 		const nr = sig['5g'] || {}, lte = sig.lte || {};
 		const val = v => v && v !== '--' ? v : null;
 		const num = v => val(v) ? String(Math.round(parseFloat(v) * 10) / 10).replace('-', '−') : '—';
 		const q = +(g['signal-quality'] && g['signal-quality'].value) || 0;
+		/* 5G non-standalone reports a 5G leg even when it has no usable 5G signal (e.g. −156 dBm) */
+		const nrDead = val(nr.rsrp) && (parseFloat(nr.rsrp) <= -140 || (val(nr.snr) && parseFloat(nr.snr) <= -20));
+		const techs = (g['access-technologies'] || []).filter(t => !(nrDead && t === '5gnr'));
 		const bearer = m.bearer && m.bearer.bearer;
 		const ip4 = bearer && bearer['ipv4-config'] && bearer['ipv4-config'].address;
 		status.replaceChildren(h('div', { class: 'group' }, h('dl', { class: 'kv' },
 			h('dt', 'Carrier'), h('dd', op['operator-name'] || '—'),
 			h('dt', 'State'), h('dd', g.state === 'connected' ? 'Connected' : (g.state || '—')),
-			h('dt', 'Network'), h('dd', techName(g['access-technologies'])),
+			h('dt', 'Network'), h('dd', techName(techs) + (nrDead ? ' (5G not reachable now)' : '')),
 			h('dt', 'Signal'), h('dd', Data.signalBars(q >= 75 ? -50 : q >= 50 ? -60 : q >= 25 ? -70 : q ? -80 : 0), ` ${q}%`),
-			val(nr.rsrp) ? [h('dt', '5G signal'), h('dd', `${num(nr.rsrp)} dBm`), h('dt', '5G quality'), h('dd', `RSRQ ${num(nr.rsrq)} dB · SINR ${num(nr.snr)} dB`)] : null,
-			val(lte.rsrp) ? [h('dt', 'LTE signal'), h('dd', `${num(lte.rsrp)} dBm`), h('dt', 'LTE quality'), h('dd', `RSRQ ${num(lte.rsrq)} dB · SINR ${num(lte.snr)} dB`)] : null,
+			val(nr.rsrp) ? (nrDead ? [h('dt', '5G signal'), h('dd', 'None right now (using LTE)')] : [h('dt', '5G signal'), h('dd', `${num(nr.rsrp)} dBm`), h('dt', '5G quality'), h('dd', [val(nr.rsrq) ? `RSRQ ${num(nr.rsrq)} dB` : null, val(nr.snr) ? `SINR ${num(nr.snr)} dB` : null].filter(Boolean).join(' · ') || '—')]) : null,
+			val(lte.rsrp) ? [h('dt', 'LTE signal'), h('dd', `${num(lte.rsrp)} dBm`), h('dt', 'LTE quality'), h('dd', [val(lte.rsrq) ? `RSRQ ${num(lte.rsrq)} dB` : null, val(lte.snr) ? `SINR ${num(lte.snr)} dB` : null].filter(Boolean).join(' · ') || '—')] : null,
 			h('dt', 'Registration'), h('dd', ({ home: 'Home network', roaming: 'Roaming', searching: 'Searching…', denied: 'Refused by the carrier', idle: 'Not registered' })[op['registration-state']] || op['registration-state'] || '—'),
 			ip4 ? [h('dt', 'Mobile address'), h('dd', ip4)] : null,
 			h('dt', 'IMEI'), h('dd', h('a', { href: '#', onclick: e => { e.preventDefault(); showIds = !showIds; e.target.textContent = showIds ? (op.imei || '—') : 'Show'; } }, showIds ? (op.imei || '—') : 'Show')),
@@ -595,6 +620,8 @@ function esimError(p) {
 	const m = String(p.message || '') + (p.data ? ' ' + (typeof p.data === 'string' ? p.data : JSON.stringify(p.data)) : '');
 	if (/es10b_ProfileDownload|matchingId|MatchingID|refused/i.test(m)) return 'The activation code was refused. It may already have been used; ask the carrier for a new one. (' + m + ')';
 	if (/catBusy|disallowedByPolicy/i.test(m)) return 'The eSIM refused the change. Turn off the active profile first. (' + m + ')';
+	if (/euicc_init/i.test(m)) return 'The eSIM didn\'t answer: it is still busy, often right after a change it already made. The list below may be out of date. Restart the router, then tap “Read profiles again” before trying anything else. (' + m + ')';
+	if (/NotInDisabledState|profileNotInDisabled/i.test(m)) return 'This profile is in use. Switch to another profile first, then delete it. (' + m + ')';
 	if (/curl|tls|ssl|http/i.test(m)) return 'The router could not reach the carrier\'s server. Check that the router has internet through another connection. (' + m + ')';
 	return m || 'unknown error';
 }
@@ -698,8 +725,12 @@ async function renderDns(page) {
 	}));
 	page.append(backLink(), h('h1', { class: 'page-title' }, 'DNS'),
 		hint('DNS turns website names into addresses. The router answers for every device at home, so a change here applies to all of them.'),
-		sectionTitle('Who answers'),
+		sectionTitle(['Who answers', App.explain('DNS servers',
+				'Your internet provider\'s DNS is used by default. Public DNS services can be faster, more private, or block ads and malware for every device.',
+				'If you run AdGuard Home or another blocker on the router, it already answers for your devices; keep this as it is unless its instructions say otherwise.',
+				{ rec: 'Cloudflare (1.1.1.1) or Quad9 (9.9.9.9, also blocks known dangerous sites). With AdGuard Home, leave this alone.' })]),
 		h('div', { class: 'group' }, radios, customField),
+		info.adguard ? note(h('span', 'AdGuard Home answers name lookups on this router. Set its servers in ', h('a', { href: '#/network/adguard/settings' }, 'AdGuard Home → Settings'), '.')) : null,
 		info.doh ? note('Encrypted DNS (https-dns-proxy) is installed. It is managed in the advanced settings and may override this choice.') : null,
 		h('div', { class: 'btn-row' }, save),
 		sectionTitle('Device names'),
@@ -715,8 +746,15 @@ async function renderVpn(page) {
 	const pvBox = h('div', h('div', { class: 'skeleton' }));
 	page.append(backLink(), h('h1', { class: 'page-title' }, 'VPN'),
 		info.protonvpn ? [sectionTitle('Proton VPN'), pvBox] : null,
-		sectionTitle('WireGuard', info.wireguard ? h('a', { class: 'link', href: '#', onclick: e => { e.preventDefault(); openAddVpn(loadWg); } }, 'Add VPN') : null), wgBox,
-		sectionTitle('Tailscale'), tsBox);
+		sectionTitle(['WireGuard', App.explain('WireGuard',
+				'WireGuard connects the router to a VPN service, or lets you reach your home from outside with your own VPN server.',
+				'To connect to a VPN provider, get a WireGuard configuration file from them and add it here.',
+				{ rec: 'To reach home from outside, Tailscale is the easiest: no port to open and it works behind mobile networks.' })], info.wireguard ? h('a', { class: 'link', href: '#', onclick: e => { e.preventDefault(); openAddVpn(loadWg); } }, 'Add VPN') : null), wgBox,
+		sectionTitle(['Tailscale', App.explain('Tailscale',
+				'Tailscale links your phone, laptop and the router into a private network, wherever they are. You can reach your home devices and this page from anywhere, without opening ports.',
+				'As an exit node, the router can carry your phone\'s traffic when you are away, as if you were at home.',
+				'Sharing your home network (subnet routes) lets every Tailscale device reach your home devices; approve the route in the Tailscale admin page afterwards.',
+				{ rec: 'Use Tailscale instead of port forwarding to manage the router or reach home devices from outside.' })]), tsBox);
 	const loadPv = () => info.protonvpn ? Proton.render(pvBox, loadPv) : null;
 
 	async function loadWg() {

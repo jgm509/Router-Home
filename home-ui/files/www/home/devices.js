@@ -10,7 +10,7 @@ App.register('devices', {
 			oninput: e => { query = e.target.value.toLowerCase(); draw(); } });
 		const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter' });
 		const body = h('div', h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }));
-		page.append(h('h1', { class: 'page-title' }, 'Devices'), search, chips, body);
+		page.append(h('h1', { class: 'page-title' }, 'Clients'), search, chips, body);
 
 		function drawChips() {
 			const counts = { all: list.length, online: list.filter(d => d.online).length, paused: list.filter(d => d.paused).length };
@@ -151,8 +151,13 @@ function openDevice(d, reload) {
 				row({ icon: 'clock', label: 'Bedtime schedule', sub: 'Pause automatically at set times', right: schedOn }),
 				schedBox),
 			hint('The device stays connected to your WiFi and can still reach other devices at home.'),
-			sectionTitle('Address'),
+			sectionTitle(['Address', App.explain('Fixed address',
+				'The router normally hands out addresses as devices join, and a device can get a different one later.',
+				'A fixed address keeps it the same, which printers, cameras, servers and port forwarding need.',
+				{ rec: 'Use a fixed address for anything other devices or forwards point to; leave phones and laptops automatic.' })]),
 			group(row({ icon: 'link', label: 'Always use the same address', sub: 'Useful for printers, cameras and port forwarding', right: reserve }), ipField),
+			App.info.adguard ? group(row({ icon: 'shield', label: 'AdGuard Home rules', sub: 'Blocked services, schedule, safe search for this device', onClick: () => { close(); Agh.openClient(null, null, d); } })) : null,
+			d.ips.some(x => !x.includes(':')) ? group(row({ icon: 'globe', label: 'Forward a port to this device', sub: 'For a game server, camera or home server', onClick: () => { close(); Firewall.openForward(null, null, null, { ip: (d.host && d.host.ip) || d.ips.find(x => !x.includes(':')), name: d.name }); } })) : null,
 			h('div', { class: 'actions' }, btn('Cancel', close, 'secondary'), save),
 			(d.host || d.pause.length) ? h('div', { class: 'btn-row', style: { justifyContent: 'center' } },
 				btn('Forget this device', async ev => {

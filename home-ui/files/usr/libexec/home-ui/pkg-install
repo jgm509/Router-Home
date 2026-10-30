@@ -1,0 +1,27 @@
+#!/bin/sh
+# Router Home: install an OpenWrt package from the official feeds in the
+# background. Only names on the list below are accepted (see rpcd plugin).
+# Progress: /tmp/home-ui/pkg.progress, result: /tmp/home-ui/pkg.json
+RUN=/tmp/home-ui
+mkdir -p "$RUN"
+say() { printf '{"state":"%s","message":"%s","name":"%s"}\n' "$1" "$2" "$PKGS" > "$RUN/pkg.$3"; }
+PKGS="$*"
+say running "Updating the package list…" progress
+if command -v apk >/dev/null 2>&1; then
+	apk update >/tmp/home-ui-pkg.log 2>&1
+	say running "Installing $PKGS…" progress
+	apk add $PKGS >>/tmp/home-ui-pkg.log 2>&1; rc=$?
+else
+	opkg update >/tmp/home-ui-pkg.log 2>&1
+	say running "Installing $PKGS…" progress
+	opkg install $PKGS >>/tmp/home-ui-pkg.log 2>&1; rc=$?
+fi
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null
+if [ $rc = 0 ]; then
+	logger -t home-ui "installed $PKGS"
+	say done "Installed" json
+else
+	err="$(grep -i 'error\|not found\|unsatisfiable' /tmp/home-ui-pkg.log | tail -n 2 | tr '\n"\\' "  '" )"
+	say failed "Could not install $PKGS. ${err:-Is the router online?}" json
+fi
+rm -f "$RUN/pkg.progress"

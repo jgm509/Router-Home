@@ -1,0 +1,4 @@
+config iot 'main'
+	# Thread + Bluetooth radio (Askey SBE1V1K / EBE1V1K / CBE1V1K), set in Router Home
+	option enabled '0'
+	option ble '1'

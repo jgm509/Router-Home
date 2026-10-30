@@ -1,0 +1,153 @@
+#!/bin/sh
+# Router Home: "last working settings".
+#   goodconf check        save the settings when the internet works and they
+#                         changed; go back to the last working ones when the
+#                         internet stays down after a change (auto_recover)
+#   goodconf watch        run "check" every 2 minutes (service home-ui-guard)
+#   goodconf save         save now (only if the internet works, unless -f)
+#   goodconf list         saved points, newest first:  <id> <date> <uplink>
+#   goodconf diff [id]    what changed since a saved point (secrets hidden)
+#   goodconf restore [id] put a saved point back and reload the services
+#   goodconf undo         put back what was there before the last restore
+# Saved points: /etc/home-ui/good/<epoch>/  (newest 3 kept)
+G=${GOOD_DIR:-/etc/home-ui/good}
+CFG=${CFG_DIR:-/etc/config}
+RUN=/tmp/home-ui
+SKIP=' luci ucitrack rpcd home-ui-guard '
+mkdir -p "$G" "$RUN"
+
+log() { logger -t home-ui-guard "$*" 2>/dev/null; echo "$(date '+%F %T') $*" >> "$G/log"; tail -n 200 "$G/log" > "$G/log.tmp" 2>/dev/null && mv "$G/log.tmp" "$G/log"; }
+opt() { local v; v="$(uci -q get "home-ui-guard.main.$1")"; echo "${v:-$2}"; }
+
+latest() { ls -1 "$G" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -n 1; }
+
+# config files only (not package leftovers like dhcp.apk-new or fan-opkg)
+files() { for f in "$CFG"/*; do [ -f "$f" ] || continue; n="${f##*/}"; case "$n" in *.*|*-opkg) continue ;; esac; case "$SKIP" in *" $n "*) continue ;; esac; echo "$n"; done; }
+
+# do the current settings differ from saved point $1? (prints the configs)
+changed() {
+	local d="$G/$1" n
+	[ -n "$1" ] && [ -d "$d" ] || return 0
+	for n in $(files); do cmp -s "$CFG/$n" "$d/$n" || echo "$n"; done
+	for n in $(ls -1 "$d" 2>/dev/null); do case "$n" in meta) continue ;; esac
+		case "$SKIP" in *" $n "*) continue ;; esac
+		case "$n" in *.*|*-opkg) continue ;; esac
+		[ -f "$CFG/$n" ] || echo "$n"; done
+}
+
+internet_ok() {
+	ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 || ping -c 1 -W 3 9.9.9.9 >/dev/null 2>&1 || return 1
+	# names too: a broken DNS setup counts as broken internet
+	# (the router's own lookups, or the ones devices use on the home network)
+	local lan
+	lan="$(ip -4 -o addr show dev br-lan 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+	nslookup openwrt.org >/dev/null 2>&1 || nslookup openwrt.org 127.0.0.1 >/dev/null 2>&1 ||
+		{ [ -n "$lan" ] && nslookup openwrt.org "$lan" >/dev/null 2>&1; }
+}
+
+uplink() { ip route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1; }
+
+save() {
+	local id d
+	id="$(date +%s)"; while [ -d "$G/$id" ]; do id=$((id + 1)); done; d="$G/$id"
+	mkdir -p "$d" || return 1
+	for n in $(files); do cp -p "$CFG/$n" "$d/$n"; done
+	echo "$(date '+%F %T') $(uplink)" > "$d/meta"
+	# keep the newest 3 (an "undo" point is kept apart)
+	set -- $(ls -1 "$G" | grep -E '^[0-9]+$' | sort -rn)
+	[ $# -gt 3 ] && { shift 3; for o in "$@"; do rm -rf "${G:?}/$o"; done; }
+	rm -f "$RUN/guard-down-since" "$G/recovered"
+	echo "$id"
+}
+
+restore() {
+	local id="$1" d n undo
+	[ -n "$id" ] || id="$(latest)"
+	d="$G/$id"
+	[ -n "$id" ] && [ -d "$d" ] || { echo "no saved settings" >&2; return 1; }
+	# keep what is there now, so it can be undone
+	undo="$G/undo"; rm -rf "$undo"; mkdir -p "$undo"
+	for n in $(files); do cp -p "$CFG/$n" "$undo/$n"; done
+	echo "$(date '+%F %T') before going back to $id" > "$undo/meta"
+	for n in $(changed "$id"); do
+		if [ -f "$d/$n" ]; then cp -p "$d/$n" "$CFG/$n"; else rm -f "$CFG/$n"; fi
+		echo "$n"
+	done > "$RUN/guard-restored"
+	# throw away anything staged but not saved, then reload what changed
+	rm -rf /tmp/.uci/* 2>/dev/null
+	reload_config >/dev/null 2>&1
+	grep -qx network "$RUN/guard-restored" && { /etc/init.d/network reload >/dev/null 2>&1; }
+	grep -qxE 'dhcp' "$RUN/guard-restored" && { /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/odhcpd restart >/dev/null 2>&1; }
+	grep -qx firewall "$RUN/guard-restored" && { /etc/init.d/firewall reload >/dev/null 2>&1; }
+	grep -qx wireless "$RUN/guard-restored" && { wifi reload >/dev/null 2>&1; }
+	log "went back to the settings from $(cut -d' ' -f1,2 "$d/meta" 2>/dev/null) ($(tr '\n' ' ' < "$RUN/guard-restored"))"
+	return 0
+}
+
+undo() {
+	[ -d "$G/undo" ] || { echo "nothing to undo" >&2; return 1; }
+	local n
+	for n in $(ls -1 "$G/undo"); do [ "$n" = meta ] || cp -p "$G/undo/$n" "$CFG/$n"; done
+	rm -rf /tmp/.uci/* 2>/dev/null
+	reload_config >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+	rm -rf "$G/undo"; date +%s > "$G/recovered.undone"
+	log "undid the last restore"
+}
+
+check() {
+	# a router with a modem keeps its clock from the mobile network when it's off
+	[ -x /usr/libexec/home-ui/modem-extra ] && command -v mmcli >/dev/null 2>&1 && /usr/libexec/home-ui/modem-extra time-auto >/dev/null 2>&1
+	[ "$(opt enabled 1)" = 1 ] || return 0
+	local last now since wait
+	last="$(latest)"
+	if internet_ok; then
+		rm -f "$RUN/guard-down-since"
+		date +%s > "$RUN/guard-last-ok"
+		if [ -z "$last" ] || [ -n "$(changed "$last")" ]; then
+			# changes count as working after they've worked for a while:
+			# wait one more check so a change that breaks things later isn't saved at once
+			if [ -f "$RUN/guard-pending" ] || [ -z "$last" ]; then rm -f "$RUN/guard-pending"; save >/dev/null
+			else touch "$RUN/guard-pending"; fi
+		else rm -f "$RUN/guard-pending"; fi
+		return 0
+	fi
+	rm -f "$RUN/guard-pending"
+	now="$(date +%s)"
+	[ -f "$RUN/guard-down-since" ] || echo "$now" > "$RUN/guard-down-since"
+	since="$(cat "$RUN/guard-down-since")"
+	[ "$(opt auto_recover 1)" = 1 ] || return 0
+	[ -n "$last" ] || return 0
+	# only when something changed since it last worked (an outage at the
+	# provider changes nothing), and only once per saved point
+	[ -n "$(changed "$last")" ] || return 0
+	[ "$(cat "$G/recovered" 2>/dev/null)" = "$last" ] && return 0
+	wait="$(opt wait 10)"; [ "$wait" -ge 2 ] 2>/dev/null || wait=10
+	[ $((now - since)) -ge $((wait * 60)) ] || return 0
+	log "no internet for $wait minutes after a settings change"
+	restore "$last" && echo "$last" > "$G/recovered" && date +%s > "$G/recovered.at"
+	rm -f "$RUN/guard-down-since"
+}
+
+# show what changed (secrets hidden)
+diffp() {
+	local id="${1:-$(latest)}" n
+	[ -n "$id" ] && [ -d "$G/$id" ] || return 0
+	for n in $(changed "$id"); do
+		echo "### $n"
+		diff -u "$G/$id/$n" "$CFG/$n" 2>/dev/null | sed -n '3,$p' | grep -E '^[-+]' |
+			sed -E "s/^([-+][[:space:]]*(option|list)[[:space:]]+(key|password|private_key|preshared_key|psk|secret|token|auth_key|sae_password)[[:space:]]+).*/\\1'••••••'/"
+	done
+}
+
+case "$1" in
+	check) check ;;
+	watch) while :; do check; sleep 120; done ;;
+	save) if [ "$2" = -f ] || internet_ok; then save; else echo "the internet doesn't work right now" >&2; exit 1; fi ;;
+	list) for id in $(ls -1 "$G" 2>/dev/null | grep -E '^[0-9]+$' | sort -rn); do echo "$id $(cat "$G/$id/meta" 2>/dev/null)"; done ;;
+	changed) changed "${2:-$(latest)}" ;;
+	diff) diffp "$2" ;;
+	restore) restore "$2" ;;
+	undo) undo ;;
+	*) sed -n '2,13p' "$0"; exit 1 ;;
+esac

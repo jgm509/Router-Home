@@ -1,0 +1,5 @@
+#!/bin/sh
+# Router Home: first boot of a firmware image that has it built in.
+# Sets up the add-ons made for this router model (front light, fan, modem).
+[ -x /usr/libexec/home-ui/addon ] && /usr/libexec/home-ui/addon autoinstall >/dev/null 2>&1
+exit 0

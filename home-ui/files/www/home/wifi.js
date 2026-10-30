@@ -49,7 +49,7 @@ App.register('wifi', {
 		const nets = h('div', h('div', { class: 'skeleton' }));
 		const radiosBox = h('div', h('div', { class: 'skeleton' }));
 		page.append(
-			h('h1', { class: 'page-title' }, 'WiFi'),
+			h('h1', { class: 'page-title' }, 'Wireless'),
 			sectionTitle('Networks', h('a', { class: 'link', href: '#', onclick: e => { e.preventDefault(); openAddNetwork(state, load); } }, 'Add network')),
 			nets,
 			sectionTitle('Radios'),
@@ -137,7 +137,7 @@ function openNetwork(ssid, secs, state, reload) {
 					await uci.set('wireless', b.s['.name'], vals);
 					if (sec.value === 'none' && b.s.key) await uci.unset('wireless', b.s['.name'], ['key']);
 				} else if (b.t.checked) {
-					await uci.add('wireless', 'wifi-iface', Object.assign({ device: b.r.name, mode: 'ap', network: tmpl.network || 'lan' }, vals));
+					await uci.addWifi(Object.assign({ device: b.r.name, mode: 'ap', network: tmpl.network || 'lan' }, vals));
 				}
 			}
 			if (await uci.apply('Saving… WiFi restarts for a few seconds')) { close(); reload(); }
@@ -152,9 +152,15 @@ function openNetwork(ssid, secs, state, reload) {
 		return h('div',
 			h('div', { class: 'group' }, field('Network name', name), field('Security', sec), keyField),
 			radios.some(r => r.band === '6g') && sec.value !== 'none' ? hint('6 GHz always uses WPA3, which every 6 GHz device supports.') : null,
-			sectionTitle('Bands'),
+			sectionTitle(['Bands', App.explain('Bands',
+				'2.4 GHz reaches farthest and through walls, but is slower and crowded. 5 GHz is fast with good range. 6 GHz is the fastest and least crowded, but has the shortest range and only newer devices (WiFi 6E/7) see it.',
+				'With the same name on several bands, devices pick the best band by themselves.',
+				{ rec: 'Turn on all bands with the same name and password. Make a separate 2.4 GHz-only network only if an old smart-home gadget can\'t join.' })]),
 			group(...bandToggles.map(b => row({ icon: 'antenna', label: b.r.bandName, sub: b.r.band === '2g' ? 'Longest range, slowest' : b.r.band === '5g' ? 'Good range and speed' : b.r.band === '6g' ? 'Fastest, shortest range, newest devices' : '', right: b.t }))),
-			sectionTitle('Options'),
+			sectionTitle(['Options', App.explain('Hidden network',
+				'A hidden network doesn\'t show up in the WiFi list; devices have to type its name to join.',
+				'It doesn\'t make the network safer: the name is still sent when devices connect, and phones keep searching for it everywhere they go.',
+				{ rec: 'Leave the name visible and use a strong password with WPA2/WPA3.' })]),
 			group(row({ icon: 'lock', label: 'Hide network name', sub: 'Devices must type the name to join', right: hidden })),
 			h('div', { class: 'actions' }, btn('Share', () => WifiShare.show({ ssid: name.value, key: key.value, encryption: sec.value, hidden: hidden.checked ? '1' : '0' }), 'secondary'), save),
 			h('div', { class: 'btn-row', style: { justifyContent: 'center' } }, del));
@@ -175,7 +181,7 @@ function openAddNetwork(state, reload) {
 			if (!t.some(x => x.t.checked)) throw new Error('Pick at least one band');
 			for (const x of t) if (x.t.checked) {
 				const is6 = x.r.band === '6g';
-				await uci.add('wireless', 'wifi-iface', { device: x.r.name, mode: 'ap', network: 'lan', ssid: n, key: key.value,
+				await uci.addWifi({ device: x.r.name, mode: 'ap', network: 'lan', ssid: n, key: key.value,
 					encryption: is6 ? 'sae' : sec.value, ieee80211w: is6 ? '2' : undefined });
 			}
 			if (await uci.apply('Creating network…')) { close(); reload(); }
@@ -224,7 +230,11 @@ async function openRadio(r, state, reload) {
 		}));
 		return h('div',
 			group(row({ icon: 'power', label: 'Radio on', sub: 'Turning it off removes this band from every network', right: enabled })),
-			sectionTitle('Channel'),
+			sectionTitle(['Channel', App.explain('Channel and width',
+				'The channel is the slice of radio space the router talks on. Neighbors on the same channel slow each other down. Automatic picks a quiet one when the radio starts.',
+				'Channel width: wider is faster, but picks up more interference and reaches a bit less far. On 2.4 GHz, 20 MHz is best almost everywhere.',
+				'5 GHz channels marked “radar check” (DFS) are often the emptiest, but the router must listen for weather radar for a minute before using them, and moves away if it hears one.',
+				{ rec: '2.4 GHz: 20 MHz, channel 1, 6 or 11 (or Automatic). 5 GHz: 80 MHz, Automatic or 36/149. 6 GHz: 160 MHz or more, Automatic.' })]),
 			h('div', { class: 'group' }, field('Channel', chanSel), h('div', { class: 'field' }, h('span', 'Channel width (MHz)'), widthSeg)),
 			hint('Wider channels are faster but more sensitive to interference.' + (r.band === '6g' ? ' Your phone or laptop decides the width it uses; 320 MHz only helps devices that support it.' : '')),
 			note(h('span', h('strong', 'Recommended: '), rec.why, ' ', h('a', { href: '#', onclick: e => {
@@ -234,7 +244,10 @@ async function openRadio(r, state, reload) {
 				width = w; widthSeg.value = w;
 				for (const b of widthSeg.children) b.setAttribute('aria-pressed', b.textContent === String(w) ? 'true' : 'false');
 			} }, 'Use this'))),
-			sectionTitle('Advanced'),
+			sectionTitle(['Advanced', App.explain('Power and country',
+				'Transmit power: how loud the router talks. Lower power can help when you have several access points close together, so devices move to the nearest one. Otherwise, more is better.',
+				'Country: sets the legal channels and power for where you live. A wrong country can hide channels from your devices or break the law.',
+				{ rec: 'Maximum allowed power, and your real country.' })]),
 			h('div', { class: 'group' }, field('Transmit power', pow), field('Country', country)),
 			hint('The country decides which channels and power levels are legal. It applies to every radio.'),
 			h('div', { class: 'actions' }, btn('Cancel', close, 'secondary'), save));

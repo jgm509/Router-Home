@@ -36,6 +36,7 @@ App.register('system', {
 			group(
 				row({ icon: 'log', label: 'System log', sub: 'Recent messages from the router', onClick: openLog }),
 				row({ icon: 'power', label: 'Restart router', onClick: reboot }),
+				row({ icon: 'refresh', label: 'Reset settings, keep WiFi', sub: 'Network, DNS and firewall back to defaults; WiFi, apps and passwords stay', onClick: openSoftReset }),
 				row({ icon: 'trash', label: 'Reset to factory settings', danger: true, onClick: factory })),
 			sectionTitle('More'),
 			group(
@@ -55,26 +56,8 @@ App.register('system', {
 	}
 });
 
-function themeName() {
-	let t = null; try { t = localStorage.getItem('home-theme'); } catch (e) {}
-	return t === 'light' ? 'Light' : t === 'dark' ? 'Dark' : 'Automatic';
-}
-function applyTheme() {
-	let t = null; try { t = localStorage.getItem('home-theme'); } catch (e) {}
-	if (t) document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme');
-}
-applyTheme();
-
-function openTheme() {
-	const { h, seg, sheet, hint } = App;
-	let cur = null; try { cur = localStorage.getItem('home-theme') || 'auto'; } catch (e) { cur = 'auto'; }
-	sheet('Appearance', h('div',
-		seg([['auto', 'Automatic'], ['light', 'Light'], ['dark', 'Dark']], cur, v => {
-			try { v === 'auto' ? localStorage.removeItem('home-theme') : localStorage.setItem('home-theme', v); } catch (e) {}
-			applyTheme();
-		}),
-		hint('Automatic follows your phone or computer.')), { onClose: () => App.route() });
-}
+function themeName() { return Theme.name(); }
+function openTheme() { App.go('more/appearance'); }
 
 function openGeneral(s0, tzs) {
 	const { h, field, input, select, btn, busy, uci, sheet, hint } = App;
@@ -363,14 +346,24 @@ function openBackup() {
 }
 
 function restoreBanner(r) {
-	const { h, note, btn, sheet } = App;
+	const { h, note, btn, busy, rpc, sheet, toast } = App;
 	if (!r || r.state === 'none' || r.dismissed) return null;
 	if (r.state === 'done' && r.done_age > 7 * 86400) return null;
-	const kind = r.state === 'failed' ? 'warn' : null;
-	const title = r.state === 'running' ? 'Restoring your apps…' : r.state === 'failed' ? 'Restore stopped' : 'Restore finished';
+	/* "running" but nothing is running: the router restarted or the wait gave up */
+	const stalled = r.state === 'running' && !r.active;
+	const kind = r.state === 'failed' || stalled ? 'warn' : null;
+	const title = stalled ? 'Restore paused' : r.state === 'running' ? 'Restoring your apps…' : r.state === 'failed' ? 'Restore stopped' : 'Restore finished';
+	const msg = stalled ? 'It stopped before it finished, for example because the router restarted. Make sure the router is online, then tap Continue.' : (r.message || '');
 	const showLog = () => sheet('Restore log', close => h('div', h('pre', { class: 'log' }, r.log || '(empty)'), h('div', { class: 'actions' }, btn('Close', close))));
-	const box = note(h('div', h('strong', title), h('div', r.message || ''),
-		h('div', { style: { display: 'flex', gap: '18px', marginTop: '6px' } },
+	const retryFailed = r.state === 'done' && /Could not reinstall/.test(r.message || '');
+	const cont = r.state !== 'done' || retryFailed ? btn(retryFailed ? 'Try again' : r.state === 'running' && !stalled ? 'Try now' : 'Continue', () => busy(cont, async () => {
+		await rpc('home-ui', 'restore_retry', {});
+		toast('Restore continues. This page updates by itself.');
+		setTimeout(() => location.reload(), 4000);
+	}), 'small') : null;
+	const box = note(h('div', h('strong', title), h('div', msg),
+		h('div', { style: { display: 'flex', gap: '18px', marginTop: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+			cont,
 			h('a', { class: 'link', href: '#', onclick: e => { e.preventDefault(); showLog(); } }, 'Details'),
 			r.state !== 'running' ? h('a', { class: 'link', href: '#', onclick: e => {
 				e.preventDefault(); box.remove();
@@ -624,4 +617,39 @@ function openFanOnOff(f, onDone) {
 			h('div', { class: 'actions' }, btn('Close', close, 'secondary'), save));
 	}, { onClose: () => stop && stop() });
 	stop = every(5000, async () => drawNow(await call('home-ui', 'fan_status')));
+}
+
+function openSoftReset() {
+	const { h, row, group, toggle, btn, busy, rpc, sheet, hint, note, explain } = App;
+	const keepUp = toggle(true, null, 'Keep the internet connection');
+	sheet('Reset settings, keep WiFi', close => {
+		const go = btn('Reset settings', () => busy(go, async () => {
+			if (!await App.confirm('Reset the network settings?', 'The router’s address becomes 192.168.1.1. Your WiFi names and passwords stay, so your devices reconnect by themselves. Wired devices may need to be unplugged and plugged back in.', 'Reset', true)) return;
+			const r = await rpc('home-ui', 'soft_reset', { keep_uplink: keepUp.checked });
+			if (r && r.error) throw new Error(r.error);
+			close();
+			const s = blockingSheet('Resetting settings', 'The network restarts. In about a minute, reconnect to your WiFi and open http://192.168.1.1/home/. If something was better before, open Internet → Connection check and tap Undo.');
+			/* the page comes back at the default address once the network is up */
+			setTimeout(() => { location.href = `${location.protocol}//192.168.1.1/home/`; }, 45000);
+			return s;
+		}), 'danger');
+		return h('div',
+			note(h('div', h('strong', 'Use this when the internet stopped working and you don\'t know why.'), h('div', 'It is like a factory reset for the network only, without losing WiFi access.'))),
+			h('h2', { class: 'section-title' }, h('span', 'What goes back to defaults', explain('Reset settings',
+				'Reset: the home network (address 192.168.1.1), DHCP and name lookups (DNS), the firewall (zones, port forwards, rules), separate networks (guest, smart home), VPN interfaces, SSH and web server settings. Apps that take over name lookups or traffic (AdGuard Home, encrypted DNS, Proton VPN, UPnP) are switched off.',
+				'Kept: your WiFi names and passwords, the admin password, the router name and time zone, installed apps (and their own settings), Router Home, and device names on the Devices page (fixed addresses only when they fit the 192.168.1.x range).',
+				'Before resetting, the current settings are saved. Internet → Connection check → Undo puts them back.',
+				{ rec: 'Try Internet → Connection check first: it often finds the exact problem. Use this when that doesn\'t help.' }))),
+			group(
+				row({ icon: 'network', label: 'Home network, DHCP and DNS', sub: 'Router address becomes 192.168.1.1' }),
+				row({ icon: 'shield', label: 'Firewall', sub: 'Port forwards, rules, guest networks' }),
+				row({ icon: 'vpn', label: 'VPNs and DNS apps', sub: 'Switched off; turn them back on when needed' })),
+			h('h2', { class: 'section-title' }, h('span', 'Kept')),
+			group(
+				row({ icon: 'wifi', label: 'WiFi names and passwords' }),
+				row({ icon: 'lock', label: 'Admin password, router name, apps' }),
+				row({ icon: 'globe', label: 'Keep the internet connection', sub: 'WAN, PPPoE login, WiFi uplink or mobile. Turn off if that is what broke.', right: keepUp })),
+			hint('A copy of the current settings is kept: Internet → Connection check → Undo.'),
+			h('div', { class: 'actions' }, btn('Cancel', close, 'secondary'), go));
+	});
 }

@@ -1,0 +1,9 @@
+# Router Home: remembers the last settings that had a working internet
+# connection and can go back to them (see /usr/libexec/home-ui/goodconf)
+config guard 'main'
+	# save working settings
+	option enabled '1'
+	# go back by itself when the internet stops after a settings change
+	option auto_recover '1'
+	# minutes without internet before going back
+	option wait '10'

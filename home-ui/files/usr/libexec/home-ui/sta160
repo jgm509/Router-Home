@@ -1,0 +1,22 @@
+#!/bin/sh
+# Router Home: work around ath11k (IPQ8074 and similar) losing most packets
+# when it joins a WiFi network as a client at 160 MHz. The chip can send on
+# 4 streams at 80 MHz but only 2 at 160 MHz; the driver still picks 4, so
+# almost everything it sends is lost and resent (seconds of delay). Limiting
+# the client to 2 streams fixes it, at no cost at 160 MHz.
+# Usage: sta160 [interface]   (no interface: every WiFi client interface)
+NET=${NET:-/sys/class/net}
+fix() {
+	local dev="$1" drv
+	[ -e "$NET/$dev/phy80211" ] || return 0
+	drv="$(basename "$(readlink "$NET/$dev/device/driver" 2>/dev/null)")"
+	case "$drv" in ath11k*) ;; *) return 0 ;; esac
+	[ "$(uci -q get home-ui.main.sta160_fix)" = 0 ] && return 0
+	iw dev "$dev" info 2>/dev/null | grep -q 'type managed' || return 0
+	iw dev "$dev" info 2>/dev/null | grep -q 'width: 160 MHz' || return 0
+	iw dev "$dev" set bitrates he-mcs-5 1:0-11 2:0-11 vht-mcs-5 1:0-9 2:0-9 2>/dev/null &&
+		logger -t home-ui "$dev joined at 160 MHz on $drv: limited to 2 streams so it doesn't lose packets"
+}
+if [ -n "$1" ]; then fix "$1"
+else for d in "$NET"/*; do fix "${d##*/}"; done; fi
+exit 0

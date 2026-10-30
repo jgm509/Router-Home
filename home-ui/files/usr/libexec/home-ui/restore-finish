@@ -1,5 +1,7 @@
 #!/bin/sh
-# Router Home: finish a full-backup restore (runs once, from the boot hook).
+# Router Home: finish a full-backup restore. Started by the boot hook, again
+# at every boot until it is done (/etc/init.d/home-ui-restore), and by the
+# Continue button in Router Home.
 #  1. put back files added by hand that the new firmware doesn't have
 #  2. put back Router Home and apps that aren't in the OpenWrt feeds, unless
 #     the new firmware already has the same or a newer version
@@ -16,6 +18,23 @@ umask 022
 # only one at a time
 [ -f /tmp/home-ui-restore.pid ] && kill -0 "$(cat /tmp/home-ui-restore.pid)" 2>/dev/null && exit 0
 echo $$ > /tmp/home-ui-restore.pid
+
+# keep coming back after a reboot until the restore is done
+if [ ! -x /etc/init.d/home-ui-restore ]; then
+	cat > /etc/init.d/home-ui-restore <<'INIT'
+#!/bin/sh /etc/rc.common
+# Router Home: continue an unfinished full-backup restore (removes itself when done)
+START=99
+start() {
+	[ -f /etc/home-ui/restore/done ] && return 0
+	f=/usr/libexec/home-ui/restore-finish
+	[ -x "$f" ] || f=/etc/home-ui/restore/finish.sh
+	[ -x "$f" ] && ( sleep 30; "$f" ) </dev/null >/dev/null 2>&1 &
+}
+INIT
+	chmod 755 /etc/init.d/home-ui-restore
+fi
+/etc/init.d/home-ui-restore enabled 2>/dev/null || /etc/init.d/home-ui-restore enable 2>/dev/null
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; logger -t home-ui-restore "$*"; }
 state() { echo "$1" > "$R/state"; [ -n "$2" ] && echo "$2" > "$R/message"; }
@@ -51,16 +70,79 @@ put_back() {	# staged dir; copies everything in it to /
 		cp -a "$1$f" "$f" 2>/dev/null
 	done
 }
+# internet = a default route, an answer from the internet, and a working
+# name lookup; the package lists are refreshed afterwards, and one broken
+# package source must not hold everything else back
 online() {
+	[ -n "$(ip route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ] || return 1
+	ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 || ping -c 1 -W 3 9.9.9.9 >/dev/null 2>&1 || return 1
+	nslookup downloads.openwrt.org >/dev/null 2>&1 && return 0
+	# the internet answers but names don't: the router's own DNS server may
+	# not be there yet (AdGuard Home and others are among the apps being
+	# reinstalled, with dnsmasq moved off port 53). Let the router itself
+	# use the provider's and public DNS until the apps are back.
+	dns_fallback && nslookup downloads.openwrt.org >/dev/null 2>&1
+}
+DNS_SAVED=""
+dns_fallback() {
+	[ -z "$DNS_SAVED" ] || return 0
+	DNS_SAVED=/tmp/home-ui-resolv.conf.saved
+	rm -f "$DNS_SAVED"; cp -P /tmp/resolv.conf "$DNS_SAVED" 2>/dev/null || : > "$DNS_SAVED"
+	{
+		grep -h '^nameserver' /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto 2>/dev/null | grep -vE ' (127\.|::1)' 
+		printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n'
+	} | awk '!seen[$0]++' > /tmp/home-ui-resolv.conf
+	rm -f /tmp/resolv.conf; cp /tmp/home-ui-resolv.conf /tmp/resolv.conf
+	log "name lookups on the router did not work (its DNS server may be one of the apps to reinstall); using the provider's and public DNS for now"
+}
+dns_restore() {
+	[ -n "$DNS_SAVED" ] && [ -e "$DNS_SAVED" -o -L "$DNS_SAVED" ] || return 0
+	rm -f /tmp/resolv.conf; cp -P "$DNS_SAVED" /tmp/resolv.conf 2>/dev/null; rm -f "$DNS_SAVED" /tmp/home-ui-resolv.conf
+}
+# another apk/opkg (an update started by hand, LuCI, another app) holds the
+# package database: wait for it instead of failing every app at once
+pm_run() {
+	local out rc i=0
+	while :; do
+		out="$("$@" 2>&1)"; rc=$?
+		[ -n "$out" ] && printf '%s\n' "$out" >> "$LOG"
+		[ $rc = 0 ] && return 0
+		echo "$out" | grep -qiE 'lock|temporarily unavailable' || { PM_OUT="$out"; return $rc; }
+		i=$((i + 1)); [ $i -ge 40 ] && { PM_OUT="$out"; return $rc; }
+		[ $i = 1 ] && log "the package manager is busy (another install or update is running); waiting"
+		sleep 15
+	done
+}
+pm_update_once() {
 	case $PM in
-	apk) apk update >/dev/null 2>&1 ;;
-	opkg) opkg update >/dev/null 2>&1 ;;
+	apk) pm_run apk update ;;
+	opkg) pm_run opkg update ;;
 	esac
+}
+VPN_STOPPED=""
+pm_update() {
+	pm_update_once && return 0
+	# "Operation not permitted": a VPN put back by the restore (signed out,
+	# not connected yet) blocks the router's own traffic. Pause it while
+	# the apps are installed.
+	if echo "$PM_OUT" | grep -qi 'not permitted'; then
+		for v in protonvpn; do
+			[ -x "/etc/init.d/$v" ] || continue
+			"/etc/init.d/$v" stop >/dev/null 2>&1 && VPN_STOPPED="$VPN_STOPPED $v"
+		done
+		if [ -n "$VPN_STOPPED" ]; then
+			fw4 reload >/dev/null 2>&1; sleep 3
+			log "downloads were blocked; paused$VPN_STOPPED while the apps are installed (sign in to it again afterwards if needed)"
+			pm_update_once && return 0
+		fi
+	fi
+	log "package list update had errors (continuing with the sources that worked): $(echo "$PM_OUT" | grep -iE 'error|fail|unable' | head -3 | tr '\n' ' ')"
+	return 0
 }
 pm_add() {
 	case $PM in
-	apk) apk add "$1" >> "$LOG" 2>&1 ;;
-	opkg) opkg install "$1" >> "$LOG" 2>&1 ;;
+	apk) pm_run apk add "$1" ;;
+	opkg) pm_run opkg install "$1" ;;
 	esac
 }
 
@@ -114,14 +196,19 @@ if [ -n "$missing" ]; then
 	tries=0
 	until online; do
 		tries=$((tries + 1))
-		[ $tries -ge 120 ] && { state failed "No internet after an hour. Apps not reinstalled:$missing"; log "gave up waiting for internet"; rm -f /tmp/home-ui-restore.pid; exit 1; }
+		[ $tries = 1 ] && log "waiting for internet (checking every 30 seconds)"
+		[ $tries -ge 120 ] && { state failed "No internet after an hour. Connect the router, then tap Continue. Apps not reinstalled yet:$missing"; log "gave up waiting for internet; will try again at the next restart or with Continue"; rm -f /tmp/home-ui-restore.pid; exit 1; }
 		sleep 30
 	done
+	log "internet is up"
 	state running "Reinstalling apps:$missing"
+	pm_update
 	failed=""
 	for n in $missing; do
 		if pm_add "$n"; then log "installed $n"; changed=1; else failed="$failed $n"; log "could not install $n"; fi
 	done
+	dns_restore
+	for v in $VPN_STOPPED; do "/etc/init.d/$v" start >/dev/null 2>&1; done
 fi
 
 # 4. services as they were
@@ -138,6 +225,7 @@ done < "$R/services_off.txt"
 # done: free the space, keep the log, restart once so everything starts clean
 rm -rf "$R/files" "$R/finish.sh"
 rm -f /lib/upgrade/keep.d/home-ui-restore
+/etc/init.d/home-ui-restore disable 2>/dev/null; rm -f /etc/init.d/home-ui-restore
 if [ -n "$failed" ]; then state done "Restored. Could not reinstall:$failed"
 else state done 'Everything was restored'; fi
 date > "$R/done"

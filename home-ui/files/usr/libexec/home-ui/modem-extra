@@ -1,0 +1,207 @@
+#!/bin/sh
+# Router Home: more mobile modem controls (ModemManager + qmicli).
+#   modem-extra info              signal per band, carrier aggregation, cells, bands (JSON)
+#   modem-extra bands <b1|b2|…|any>   lock to these bands (ModemManager names: eutran-7, ngran-78) or any
+#   modem-extra sms-list | sms-send <file with number\ntext> | sms-delete <index>
+#   modem-extra time | time-set   network time from the carrier / set the router clock from it
+#   modem-extra gps-status | gps-get | gps-install <tar.gz> | gps-remove
+# Every call to the modem has a time limit, so a silent port can't hang Router Home.
+RUN=/tmp/home-ui
+GPSDIR=${GPSDIR:-/usr/lib/stockgnss}
+mkdir -p "$RUN"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+t() { local s="$1"; shift; if have timeout; then timeout "$s" "$@"; else "$@"; fi; }
+mm() { t 15 mmcli "$@" 2>/dev/null; }
+esc() { printf '%s' "$1" | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); gsub(/\r/,""); if (NR>1) printf "\\n"; print}'; }
+json_or_null() { case "$1" in \{*) printf '%s' "$1" ;; *) printf 'null' ;; esac; }
+
+# the modem's QMI channel for qmicli: through MBIM (shared with ModemManager) or a QMI port
+qmi() {
+	local j p
+	j="$(mm -J -m any)"
+	p="$(echo "$j" | jsonfilter -e '@.modem.generic.ports[*]' 2>/dev/null | sed -n 's/^\([^ ]*\) (mbim)$/\1/p' | head -n1)"
+	if [ -n "$p" ]; then t 12 qmicli -p -d "/dev/$p" --device-open-mbim "$@" 2>&1; return; fi
+	p="$(echo "$j" | jsonfilter -e '@.modem.generic.ports[*]' 2>/dev/null | sed -n 's/^\([^ ]*\) (qmi)$/\1/p' | head -n1)"
+	[ -n "$p" ] && t 12 qmicli -p -d "/dev/$p" "$@" 2>&1
+}
+
+case "$1" in
+info)
+	have mmcli || { echo '{"error":"ModemManager is not installed"}'; exit 0; }
+	m="$(mm -J -m any)"
+	[ -n "$m" ] || { echo '{"error":"No modem found"}'; exit 0; }
+	mm -m any --signal-setup=10 >/dev/null
+	s="$(mm -J -m any --signal-get)"
+	rf=""; ca=""; cell=""; sys=""
+	if have qmicli; then
+		rf="$(qmi --nas-get-rf-band-info)"
+		ca="$(qmi --nas-get-lte-cphy-ca-info)"
+		cell="$(qmi --nas-get-cell-location-info)"
+		sys="$(qmi --nas-get-system-selection-preference)"
+	fi
+	printf '{"modem":%s,"signal":%s,"qmicli":%s,"rf":"%s","ca":"%s","cell":"%s","sysprefs":"%s"}\n' \
+		"$(json_or_null "$m")" "$(json_or_null "$s")" "$(have qmicli && echo true || echo false)" "$(esc "$rf")" "$(esc "$ca")" "$(esc "$cell")" "$(esc "$sys")"
+	;;
+bands)
+	case "$2" in ''|*[!a-z0-9\|-]*) echo '{"error":"bad band list"}'; exit 0 ;; esac
+	out="$(mm -m any --set-current-bands="$2" 2>&1)"
+	if echo "$out" | grep -qi 'success'; then logger -t home-ui "modem bands set to $2"; echo '{"ok":true}'
+	else printf '{"error":"%s"}\n' "$(esc "$(echo "$out" | tail -n 2)")"; fi
+	;;
+sms-list)
+	printf '{"messages":['
+	first=1
+	for p in $(mm -m any --messaging-list-sms | sed -n 's#.*/SMS/\([0-9]*\).*#\1#p'); do
+		j="$(mm -J -s "$p")"; case "$j" in \{*) ;; *) continue ;; esac
+		[ $first = 1 ] || printf ','; first=0
+		printf '{"index":%s,"sms":%s}' "$p" "$j"
+	done
+	printf ']}\n'
+	;;
+sms-send)
+	[ -f "$2" ] || { echo '{"error":"nothing to send"}'; exit 0; }
+	num="$(sed -n 1p "$2")"; txt="$(sed '1d' "$2")"
+	case "$num" in ''|*[!0-9+*#]*) echo '{"error":"Enter a phone number (digits, + allowed)"}'; exit 0 ;; esac
+	txt="$(printf '%s' "$txt" | sed "s/'/’/g")"
+	out="$(mm -m any --messaging-create-sms="text='$txt',number='$num'" 2>&1)"
+	p="$(echo "$out" | sed -n 's#.*/SMS/\([0-9]*\).*#\1#p' | head -n1)"
+	[ -n "$p" ] || { printf '{"error":"%s"}\n' "$(esc "$(echo "$out" | tail -n 1)")"; exit 0; }
+	out="$(t 60 mmcli -s "$p" --send 2>&1)"
+	if echo "$out" | grep -qi 'success'; then echo '{"ok":true}'
+	else
+		# don't keep the unsent copy around
+		mm -m any --messaging-delete-sms="$p" >/dev/null
+		if echo "$out" | grep -qiE 'Failure|MobileEquipment|network|not allowed|unsupported'; then
+			echo '{"error":"The mobile network refused the text. Data-only plans (many IoT and travel eSIMs) can'"'"'t send SMS; check whether your plan includes texting."}'
+		else printf '{"error":"%s"}\n' "$(esc "$(echo "$out" | tail -n 1)")"; fi
+	fi
+	;;
+sms-delete)
+	case "$2" in ''|*[!0-9]*) echo '{"error":"bad index"}'; exit 0 ;; esac
+	mm -m any --messaging-delete-sms="$2" >/dev/null && echo '{"ok":true}' || echo '{"error":"Could not delete"}'
+	;;
+time)
+	j="$(mm -J -m any --time)"
+	printf '{"time":%s,"router":"%s","router_epoch":%s}\n' "$(json_or_null "$j")" "$(date '+%F %T %Z')" "$(date +%s)"
+	;;
+time-set|time-auto)
+	have mmcli || { echo '{"error":"ModemManager is not installed"}'; exit 0; }
+	n="$(mm -J -m any --time | jsonfilter -e '@.modem.time.current' 2>/dev/null)"
+	[ -n "$n" ] && [ "$n" != "--" ] || { echo '{"error":"The mobile network does not send the time right now"}'; exit 0; }
+	# 2026-10-26T19:20:31-04:00 -> seconds since 1970 (busybox date has no time zone offsets)
+	d="${n%%[+-][0-9][0-9]:[0-9][0-9]}"; d="${d%Z}"; off="${n#"$d"}"
+	sign=1; case "$off" in -*) sign=-1 ;; esac
+	oh="$(echo "$off" | sed -n 's/^[+-]\([0-9][0-9]\):\([0-9][0-9]\)$/\1/p')"; om="$(echo "$off" | sed -n 's/^[+-]\([0-9][0-9]\):\([0-9][0-9]\)$/\2/p')"
+	ep="$(date -u -d "$(echo "$d" | tr 'T' ' ')" +%s 2>/dev/null)" || { echo '{"error":"Unreadable network time"}'; exit 0; }
+	oh="${oh#0}"; om="${om#0}"
+	[ -n "$oh$om" ] && ep=$((ep - sign * (${oh:-0} * 3600 + ${om:-0} * 60)))
+	now="$(date +%s)"; diff=$((now - ep)); [ $diff -lt 0 ] && diff=$((-diff))
+	# automatic: only when the clock is more than 5 minutes off
+	[ "$1" = time-auto ] && [ $diff -le 300 ] && { echo '{"ok":true,"changed":false}'; exit 0; }
+	date -u -s "@$ep" >/dev/null 2>&1 || date -s "@$ep" >/dev/null 2>&1
+	hwclock -w -u >/dev/null 2>&1
+	logger -t home-ui "clock set from the mobile network ($n, was $diff s off)"
+	printf '{"ok":true,"changed":true,"time":"%s"}\n' "$(date '+%F %T %Z')"
+	;;
+band-test)
+	# lock to one LTE band at a time (5G bands stay allowed, as 5G here
+	# needs an LTE anchor), measure, then put the old bands back
+	list="$(echo "$2" | tr '|' ' ')"
+	[ -n "$list" ] || { echo '{"error":"no bands"}'; exit 0; }
+	OUT="$RUN/bandtest.json"
+	orig="$(mm -J -m any | jsonfilter -e '@.modem.generic["current-bands"][*]' 2>/dev/null | tr '\n' '|' | sed 's/|$//')"
+	nr="$(mm -J -m any | jsonfilter -e '@.modem.generic["supported-bands"][*]' 2>/dev/null | grep '^ngran-' | tr '\n' '|' | sed 's/|$//')"
+	echo "$orig" > "$RUN/bandtest.orig"
+	mm -m any --signal-setup=5 >/dev/null
+	res=""; n=0; total=$(echo $list | wc -w)
+	restore() {
+		mm -m any --set-current-bands="${orig:-any}" >/dev/null || mm -m any --set-current-bands=any >/dev/null
+		rm -f "$RUN/bandtest.orig"
+	}
+	trap 'restore; printf "{\"state\":\"stopped\",\"results\":[%s]}\n" "${res#,}" > "$OUT"; exit 0' INT TERM
+	for b in $list; do
+		n=$((n + 1))
+		printf '{"state":"running","step":%s,"total":%s,"band":"%s","results":[%s]}\n' "$n" "$total" "$b" "${res#,}" > "$OUT"
+		mm -m any --set-current-bands="$b${nr:+|$nr}" >/dev/null 2>&1 || { res="$res,{\"band\":\"$b\",\"ok\":false,\"why\":\"rejected\"}"; continue; }
+		# wait for the modem to register on it (up to 45 s)
+		ok=""; w=0
+		while [ $w -lt 45 ]; do
+			sleep 3; w=$((w + 3))
+			st="$(mm -J -m any | jsonfilter -e '@.modem["3gpp"]["registration-state"]' 2>/dev/null)"
+			case "$st" in home|roaming) ok=1; break ;; esac
+		done
+		if [ -z "$ok" ]; then res="$res,{\"band\":\"$b\",\"ok\":false,\"why\":\"no service\",\"secs\":$w}"; continue; fi
+		# settle, then three samples 5 s apart: keep the averages
+		sleep 8
+		sr=0; sq=0; ss=0; k=0; nrr=""; nrs=""
+		for i in 1 2 3; do
+			j="$(mm -J -m any --signal-get)"
+			r="$(echo "$j" | jsonfilter -e '@.modem.signal.lte.rsrp' 2>/dev/null)"; q="$(echo "$j" | jsonfilter -e '@.modem.signal.lte.rsrq' 2>/dev/null)"; sn="$(echo "$j" | jsonfilter -e '@.modem.signal.lte.snr' 2>/dev/null)"
+			nrr="$(echo "$j" | jsonfilter -e '@.modem.signal["5g"].rsrp' 2>/dev/null)"; nrs="$(echo "$j" | jsonfilter -e '@.modem.signal["5g"].snr' 2>/dev/null)"
+			case "$r" in ''|--) ;; *) sr="$(awk -v a="$sr" -v b="$r" 'BEGIN{print a+b}')"; sq="$(awk -v a="$sq" -v b="${q:-0}" 'BEGIN{print a+b}')"; ss="$(awk -v a="$ss" -v b="${sn:-0}" 'BEGIN{print a+b}')"; k=$((k + 1)) ;; esac
+			[ $i -lt 3 ] && sleep 5
+		done
+		if [ $k = 0 ]; then res="$res,{\"band\":\"$b\",\"ok\":true,\"secs\":$w}"; continue; fi
+		avg() { awk -v a="$1" -v k="$k" 'BEGIN{printf "%.1f", a/k}'; }
+		case "$nrr" in ''|--) nrr=null ;; esac; case "$nrs" in ''|--) nrs=null ;; esac
+		res="$res,{\"band\":\"$b\",\"ok\":true,\"secs\":$w,\"rsrp\":$(avg $sr),\"rsrq\":$(avg $sq),\"sinr\":$(avg $ss),\"nr_rsrp\":$nrr,\"nr_sinr\":$nrs}"
+	done
+	restore
+	printf '{"state":"done","results":[%s]}\n' "${res#,}" > "$OUT"
+	logger -t home-ui "band test finished ($total bands), bands put back"
+	cat "$OUT"
+	;;
+band-test-status) cat "$RUN/bandtest.json" 2>/dev/null || echo '{"state":"idle"}' ;;
+band-test-stop)
+	[ -f "$RUN/bandtest.pid" ] && kill "$(cat "$RUN/bandtest.pid")" 2>/dev/null
+	sleep 1
+	o="$(cat "$RUN/bandtest.orig" 2>/dev/null)"
+	[ -f "$RUN/bandtest.orig" ] && { mm -m any --set-current-bands="${o:-any}" >/dev/null || mm -m any --set-current-bands=any >/dev/null; rm -f "$RUN/bandtest.orig"; }
+	echo '{"ok":true}'
+	;;
+gps-status)
+	tool=false; [ -x "$GPSDIR/bin/qmi_gnssloc_ctrl" ] && tool=true
+	qrtr=false; grep -qi qrtr /proc/net/protocols 2>/dev/null && qrtr=true
+	last="$(cat /tmp/gnss_loc_info 2>/dev/null)"
+	printf '{"tool":%s,"qrtr":%s,"last":"%s","age":%s,"job":%s}\n' "$tool" "$qrtr" "$(esc "$last")" \
+		"$( [ -f /tmp/gnss_loc_info ] && echo $(( $(date +%s) - $(date -r /tmp/gnss_loc_info +%s) )) || echo -1)" \
+		"$(cat "$RUN/gps.json" 2>/dev/null || echo null)"
+	;;
+gps-get)
+	# one position with the stock Qualcomm tool (stops after its own retries)
+	[ -x "$GPSDIR/bin/qmi_gnssloc_ctrl" ] || { echo '{"error":"The GPS tool is not installed"}'; exit 0; }
+	echo '{"state":"running"}' > "$RUN/gps.json"
+	rm -f /tmp/gnss_loc_info
+	out="$(cd /tmp && t 240 env LD_LIBRARY_PATH="$GPSDIR/lib" "$GPSDIR/bin/qmi_gnssloc_ctrl" loc get_gnss_info 2>&1)"
+	v="$(sed -n 's/^GNSSLOC:\([^,]*\),\([^,]*\),\(.*\)$/\1 \2 \3/p' /tmp/gnss_loc_info 2>/dev/null)"
+	if [ -n "$v" ]; then
+		set -- $v
+		printf '{"state":"done","lat":%s,"lon":%s,"alt":%s,"time":%s}\n' "$1" "$2" "$3" "$(date +%s)" > "$RUN/gps.json"
+	else
+		printf '{"state":"failed","message":"%s"}\n' "$(esc "$(echo "$out" | grep -v '^$' | tail -n 2)")" > "$RUN/gps.json"
+	fi
+	cat "$RUN/gps.json"
+	;;
+gps-install)
+	f="$2"; [ -f "$f" ] || { echo '{"error":"Upload the file first"}'; exit 0; }
+	tmp="$RUN/gpsx"; rm -rf "$tmp"; mkdir -p "$tmp"
+	tar -xzf "$f" -C "$tmp" 2>/dev/null || { echo '{"error":"Not a .tar.gz file"}'; rm -rf "$tmp" "$f"; exit 0; }
+	src="$(find "$tmp" -type f -name qmi_gnssloc_ctrl | head -n1)"
+	[ -n "$src" ] || { echo '{"error":"qmi_gnssloc_ctrl is not in this file"}'; rm -rf "$tmp" "$f"; exit 0; }
+	base="$(dirname "$(dirname "$src")")"
+	[ -d "$base/lib" ] || { echo '{"error":"The lib folder is missing"}'; rm -rf "$tmp" "$f"; exit 0; }
+	# only plain files and links that stay inside the folder
+	bad="$(find "$base" -type l | while read -r l; do case "$(readlink "$l")" in /*|*..*) echo "$l" ;; esac; done)"
+	[ -z "$bad" ] || { echo '{"error":"The file contains unsafe links"}'; rm -rf "$tmp" "$f"; exit 0; }
+	rm -rf "$GPSDIR"; mkdir -p "$GPSDIR"; cp -a "$base/bin" "$base/lib" "$GPSDIR/"
+	chmod 755 "$GPSDIR/bin/"*
+	# keep it through firmware updates
+	mkdir -p /lib/upgrade/keep.d; echo "$GPSDIR/" > /lib/upgrade/keep.d/home-ui-gps
+	rm -rf "$tmp" "$f"
+	logger -t home-ui "GPS tool installed in $GPSDIR"
+	echo '{"ok":true}'
+	;;
+gps-remove) rm -rf "$GPSDIR" /lib/upgrade/keep.d/home-ui-gps "$RUN/gps.json"; echo '{"ok":true}' ;;
+*) sed -n '2,9p' "$0"; exit 1 ;;
+esac

@@ -78,6 +78,24 @@ job_start() {	# $1 = job name, rest = command
 	echo '{"started":true}'
 }
 
+# vnstat's monthly totals as JSON in VJ, or null (never anything else: an
+# error message there would break the whole reply). VNS: none|starting|ok
+vnstat_json() {
+	VNS=none; VJ=null
+	have vnstat || return
+	local v
+	v="$(vnstat --json m 3 2>/dev/null)" || v=""
+	case "$v" in
+	\{*\}) VNS=ok; VJ="$v" ;;
+	*)
+		VNS=starting
+		# just installed: make sure the collector runs and knows the interfaces
+		if [ -x /etc/init.d/vnstat ] && ! pidof vnstatd >/dev/null 2>&1; then
+			/etc/init.d/vnstat enable >/dev/null 2>&1; ( /etc/init.d/vnstat start >/dev/null 2>&1 & )
+		fi ;;
+	esac
+}
+
 case "$1" in
 list)
 	cat <<-'EOF'
@@ -104,13 +122,28 @@ list)
 		"full_backup": { "action": "str" },
 		"restore_status": {},
 		"restore_dismiss": {},
+		"restore_retry": {},
 		"led_info": {},
 		"addon_list": {},
 		"addon_install": { "catalog": "str" },
 		"addon_remove": { "id": "str" },
 		"wifi_scan": { "radio": "str" },
 		"data_usage": { "period": "str" },
-		"fan_set": { "mode": "str", "speed": 50 }
+		"fan_set": { "mode": "str", "speed": 50 },
+		"security_info": {},
+		"upnp_status": {},
+		"pkg_install": { "name": "str" },
+		"pkg_status": {},
+		"diagnose": { "action": "str" },
+		"diag_fix": { "id": "str" },
+		"guard_info": {},
+		"guard_set": { "enabled": true, "auto_recover": true, "wait": 10 },
+		"guard_action": { "action": "str", "id": "str" },
+		"soft_reset": { "keep_uplink": true },
+		"agh": { "action": "str", "method": "str", "path": "str", "body": "str", "user": "str", "pass": "str" },
+		"modem_extra": { "action": "str", "bands": "str", "number": "str", "text": "str", "index": 0 },
+		"iot": { "action": "str", "name": "str", "dataset": "str", "on": true, "enabled": true, "ble": true },
+		"sysx": { "action": "str", "name": "str", "tool": "str", "target": "str", "count": 4, "six": true, "text": "str", "names": "str", "trigger": "str", "brightness": 0, "persist": true, "enabled": true, "off": "str", "on": "str" }
 	}
 	EOF
 	;;
@@ -134,6 +167,8 @@ call)
 		json_add_boolean protonvpn_login "$([ -f /www/luci-static/resources/view/protonvpn/srp.js ] && echo 1 || echo 0)"
 		json_add_boolean modemmanager "$([ -x /etc/init.d/modemmanager ] && echo 1 || echo 0)"
 		json_add_boolean doh "$([ -x /etc/init.d/https-dns-proxy ] && echo 1 || echo 0)"
+		json_add_boolean adguard "$( { [ -x /etc/init.d/adguardhome ] || [ -x /etc/init.d/AdGuardHome ] || pidof AdGuardHome >/dev/null; } && echo 1 || echo 0)"
+		case "$(board)" in askey,sbe1v1k|askey,ebe1v1k|askey,cbe1v1k) json_add_boolean iot 1 ;; *) json_add_boolean iot 0 ;; esac
 		json_add_boolean luci "$([ -d /www/luci-static ] && echo 1 || echo 0)"
 		json_add_string version "$(cat /usr/share/home-ui/version 2>/dev/null)"
 		json_dump
@@ -453,7 +488,29 @@ call)
 		;;
 
 	neigh)
-		json_init; json_add_string neigh "$(ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null)"; json_dump
+		json_init; json_add_string neigh "$(ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null)"
+		# MACs learned on wired bridge ports (wireless ports left out): who is
+		# really plugged in right now
+		fdb_ok=0; fdb=""
+		if have bridge; then
+			fdb="$(bridge fdb show 2>/dev/null | awk '/ master br-/ && !/permanent|self/ {print $1, $3}' | while read -r m d; do
+				[ -e "/sys/class/net/$d/phy80211" ] || [ -d "/sys/class/net/$d/wireless" ] || echo "$m"; done)"
+			fdb_ok=1
+		elif have brctl; then
+			for br in /sys/class/net/br-*; do
+				[ -d "$br/brif" ] || continue
+				ports=""; for p in "$br"/brif/*; do
+					d="${p##*/}"; [ -e "/sys/class/net/$d/phy80211" ] || [ -d "/sys/class/net/$d/wireless" ] && continue
+					ports="$ports $(( $(cat "$p/port_no" 2>/dev/null || echo -1) ))"
+				done
+				fdb="$fdb
+$(brctl showmacs "${br##*/}" 2>/dev/null | awk -v ports="$ports" 'NR>1 && $3=="no" { n=split(ports,a," "); for(i=1;i<=n;i++) if(a[i]==$1) print $2 }')"
+			done
+			fdb_ok=1
+		fi
+		json_add_boolean fdb_ok $fdb_ok
+		json_add_string fdb "$fdb"
+		json_dump
 		;;
 
 	log)
@@ -490,13 +547,35 @@ call)
 			printf '{"name":"%s","rx":%s,"tx":%s},' "$n" "$(cat "$d/statistics/rx_bytes" 2>/dev/null || echo 0)" "$(cat "$d/statistics/tx_bytes" 2>/dev/null || echo 0)"
 		done)"
 		up="$(cut -d. -f1 /proc/uptime)"
+		vnstat_json
 		if have nlbw; then
 			per="$(nlbw -c list 2>/dev/null | awk 'BEGIN{printf "["} /^[0-9]{4}-[0-9]{2}-[0-9]{2}/{printf "%s\"%s\"", (n++?",":""), $1} END{printf "]"}')"
 			dev="$(nlbw -c json -g mac ${period:+-t "$period"} 2>/dev/null)"
-			printf '{"nlbw":true,"uptime":%s,"periods":%s,"devices":%s,"ifaces":[%s],"vnstat":%s}\n' "$up" "${per:-[]}" "${dev:-null}" "${ifs%,}" "$( (have vnstat && vnstat --json m 3 2>/dev/null) || echo null)"
+			case "$dev" in \{*) ;; *) dev=null ;; esac
+			printf '{"nlbw":true,"uptime":%s,"periods":%s,"devices":%s,"ifaces":[%s],"vnstat":%s,"vnstat_state":"%s"}\n' "$up" "${per:-[]}" "$dev" "${ifs%,}" "$VJ" "$VNS"
 		else
-			printf '{"nlbw":false,"uptime":%s,"ifaces":[%s],"vnstat":%s}\n' "$up" "${ifs%,}" "$( (have vnstat && vnstat --json m 3 2>/dev/null) || echo null)"
+			printf '{"nlbw":false,"uptime":%s,"ifaces":[%s],"vnstat":%s,"vnstat_state":"%s"}\n' "$up" "${ifs%,}" "$VJ" "$VNS"
 		fi
+		;;
+
+	restore_retry)
+		# continue an unfinished restore now (stops a run that is still waiting)
+		R=/etc/home-ui/restore
+		[ -d "$R" ] || { echo '{"error":"There is no restore"}'; exit 0; }
+		if [ -f "$R/done" ]; then
+			# finished, but some apps could not be installed: try those again
+			grep -q 'Could not reinstall' "$R/message" 2>/dev/null && [ -s "$R/feed.txt" ] || { echo '{"error":"The restore is already complete"}'; exit 0; }
+			rm -f "$R/done" "$R/dismissed"
+		fi
+		if [ -f /tmp/home-ui-restore.pid ]; then
+			kill "$(cat /tmp/home-ui-restore.pid)" 2>/dev/null; rm -f /tmp/home-ui-restore.pid
+		fi
+		f="$JOBS/restore-finish"; [ -x "$f" ] || f="$R/finish.sh"
+		[ -x "$f" ] || { echo '{"error":"The restore script is missing"}'; exit 0; }
+		echo running > "$R/state"; echo 'Starting again…' > "$R/message"
+		if command -v setsid >/dev/null 2>&1; then setsid "$f" </dev/null >/dev/null 2>&1 &
+		else ( "$f" ) </dev/null >/dev/null 2>&1 & fi
+		echo '{"ok":true}'
 		;;
 
 	restore_dismiss)
@@ -514,6 +593,7 @@ call)
 			age=0; [ -f "$R/done" ] && age=$(( $(date +%s) - $(date -r "$R/done" +%s 2>/dev/null || date +%s) ))
 			json_add_int done_age "$age"
 			json_add_boolean dismissed "$([ -f "$R/dismissed" ] && echo 1 || echo 0)"
+			json_add_boolean active "$([ -f /tmp/home-ui-restore.pid ] && kill -0 "$(cat /tmp/home-ui-restore.pid)" 2>/dev/null && echo 1 || echo 0)"
 			json_add_string log "$(tail -n 40 "$R/log" 2>/dev/null)"
 		else
 			json_add_string state none
@@ -613,10 +693,230 @@ call)
 		echo '{"ok":true}'
 		;;
 
+	security_info)
+		# the parts of a security check the browser can't read through uci
+		json_init
+		pw="$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)"
+		case "$pw" in ''|'*'|'!'|'x') json_add_boolean root_password 0 ;; *) json_add_boolean root_password 1 ;; esac
+		json_add_boolean dropbear "$([ -x /etc/init.d/dropbear ] && /etc/init.d/dropbear enabled && echo 1 || echo 0)"
+		json_add_boolean upnp_installed "$([ -x /etc/init.d/miniupnpd ] && echo 1 || echo 0)"
+		# ports the router itself listens on, on any address
+		json_add_string listening "$(netstat -ltnu 2>/dev/null | awk 'NR>2{print $1, $4}' | sort -u | tr '\n' ';')"
+		json_dump
+		;;
+
+	upnp_status)
+		json_init
+		json_add_boolean installed "$([ -x /etc/init.d/miniupnpd ] && echo 1 || echo 0)"
+		json_add_boolean luci_app "$([ -f /usr/share/luci/menu.d/luci-app-upnp.json ] && echo 1 || echo 0)"
+		json_add_boolean running "$(pidof miniupnpd >/dev/null && echo 1 || echo 0)"
+		lf="$(uci -q get upnpd.config.upnp_lease_file)"; [ -n "$lf" ] || lf=/var/run/miniupnpd.leases
+		json_add_array leases
+		# PROTO:EXTPORT:INTADDR:INTPORT:EXPIRY:DESCRIPTION
+		[ -f "$lf" ] && while IFS=: read -r proto ext addr port exp desc; do
+			[ -n "$ext" ] || continue
+			json_add_object
+			json_add_string proto "$proto"; json_add_int ext "$ext"; json_add_string ip "$addr"
+			json_add_int port "$port"; json_add_int expires "${exp:-0}"; json_add_string desc "$desc"
+			json_close_object
+		done < "$lf"
+		json_close_array
+		json_dump
+		;;
+
+	pkg_install)
+		json_get_var name name
+		case "$name" in
+			upnp) set -- miniupnpd-nftables luci-app-upnp ;;
+			gpiod-tools|nlbwmon|luci-app-nlbwmon|vnstat2|luci-app-upnp|miniupnpd-nftables|curl|adguardhome) set -- "$name" ;;
+			*) echo '{"error":"not allowed"}'; exit 0 ;;
+		esac
+		job_start pkg "$JOBS/pkg-install" "$@"
+		;;
+
+	pkg_status)
+		job_state pkg
+		;;
+
+	diagnose)
+		json_get_var action action
+		if [ "$action" = start ]; then
+			job_start diag sh -c "$JOBS/diagnose > $RUN/diag.tmp 2>/dev/null; mv $RUN/diag.tmp $RUN/diag.json"
+		else
+			job_state diag
+		fi
+		;;
+
+	diag_fix)
+		json_get_var id id
+		case "$id" in ''|*[!a-zA-Z0-9_:.-]*) echo '{"error":"invalid"}'; exit 0 ;; esac
+		"$JOBS/diag-fix" "$id"
+		;;
+
+	guard_info)
+		G=/etc/home-ui/good
+		json_init
+		json_add_boolean enabled "$([ "$(uci -q get home-ui-guard.main.enabled)" = 0 ] && echo 0 || echo 1)"
+		json_add_boolean auto_recover "$([ "$(uci -q get home-ui-guard.main.auto_recover)" = 0 ] && echo 0 || echo 1)"
+		w="$(uci -q get home-ui-guard.main.wait)"; json_add_int wait "${w:-10}"
+		json_add_array points
+		"$JOBS/goodconf" list 2>/dev/null | while read -r id d tm up; do echo "$id|$d $tm|$up"; done > "$RUN/guard.list"
+		while IFS='|' read -r id when up; do
+			json_add_object; json_add_string id "$id"; json_add_string when "$when"; json_add_string uplink "$up"; json_close_object
+		done < "$RUN/guard.list"
+		json_close_array
+		json_add_string changed "$("$JOBS/goodconf" changed 2>/dev/null | tr '\n' ' ')"
+		json_add_string diff "$("$JOBS/goodconf" diff 2>/dev/null | head -n 120)"
+		json_add_boolean undo "$([ -d $G/undo ] && echo 1 || echo 0)"
+		json_add_string undo_when "$(cat $G/undo/meta 2>/dev/null)"
+		ra="$(cat $G/recovered.at 2>/dev/null)"; ud="$(cat $G/recovered.undone 2>/dev/null)"
+		[ -n "$ra" ] && [ "${ud:-0}" -lt "$ra" ] && json_add_int recovered_at "$ra"
+		json_add_string log "$(tail -n 20 $G/log 2>/dev/null)"
+		json_add_int down_since "$(cat $RUN/guard-down-since 2>/dev/null || echo 0)"
+		json_add_int now "$(date +%s)"
+		json_dump
+		;;
+
+	guard_set)
+		json_get_var en enabled; json_get_var ar auto_recover; json_get_var w wait
+		uci -q get home-ui-guard.main >/dev/null || { touch /etc/config/home-ui-guard; uci set home-ui-guard.main=guard; }
+		[ -n "$en" ] && uci set home-ui-guard.main.enabled="$([ "$en" = 1 ] || [ "$en" = true ] && echo 1 || echo 0)"
+		[ -n "$ar" ] && uci set home-ui-guard.main.auto_recover="$([ "$ar" = 1 ] || [ "$ar" = true ] && echo 1 || echo 0)"
+		[ "$w" -ge 2 ] 2>/dev/null && [ "$w" -le 120 ] && uci set home-ui-guard.main.wait="$w"
+		uci commit home-ui-guard
+		/etc/init.d/home-ui-guard enable >/dev/null 2>&1; /etc/init.d/home-ui-guard restart >/dev/null 2>&1
+		echo '{"ok":true}'
+		;;
+
+	guard_action)
+		json_get_var action action; json_get_var id id
+		case "$id" in *[!0-9]*) echo '{"error":"invalid"}'; exit 0 ;; esac
+		case "$action" in
+			save) out="$("$JOBS/goodconf" save 2>&1)" && echo '{"ok":true}' || printf '{"error":"%s"}\n' "$(echo "$out" | tr -d '"\n')" ;;
+			save_force) "$JOBS/goodconf" save -f >/dev/null 2>&1 && echo '{"ok":true}' || echo '{"error":"Could not save"}' ;;
+			restore) ( sleep 1; "$JOBS/goodconf" restore $id ) </dev/null >/dev/null 2>&1 & echo '{"ok":true}' ;;
+			undo) ( sleep 1; "$JOBS/goodconf" undo ) </dev/null >/dev/null 2>&1 & echo '{"ok":true}' ;;
+			dismiss) date +%s > /etc/home-ui/good/recovered.undone; echo '{"ok":true}' ;;
+			*) echo '{"error":"unknown action"}' ;;
+		esac
+		;;
+
+	soft_reset)
+		json_get_var ku keep_uplink
+		case "$ku" in 0|false) ku=0 ;; *) ku=1 ;; esac
+		[ -x "$JOBS/soft-reset" ] || { echo '{"error":"missing"}'; exit 0; }
+		# answer first: the network restarts a few seconds later
+		if command -v setsid >/dev/null 2>&1; then ( sleep 2; setsid "$JOBS/soft-reset" "$ku" ) </dev/null >/dev/null 2>&1 &
+		else ( sleep 2; "$JOBS/soft-reset" "$ku" ) </dev/null >/dev/null 2>&1 & fi
+		echo '{"ok":true,"address":"192.168.1.1"}'
+		;;
+
+	agh)
+		json_get_var action action
+		case "$action" in
+		info) "$JOBS/agh" info ;;
+		login) json_get_var u user; json_get_var p pass; "$JOBS/agh" login "$u" "$p" ;;
+		logout) "$JOBS/agh" logout ;;
+		call)
+			json_get_var m method; json_get_var path path; json_get_var body body
+			case "$m" in GET|POST|PUT|DELETE) ;; *) echo '{"error":"bad method"}'; exit 0 ;; esac
+			case "$path" in /control/*) ;; *) echo '{"error":"bad path"}'; exit 0 ;; esac
+			case "$path" in *..*|*[!A-Za-z0-9_/?=\&.%:-]*) echo '{"error":"bad path"}'; exit 0 ;; esac
+			f=""
+			if [ -n "$body" ]; then f="$RUN/agh.body.$$"; umask 077; printf '%s' "$body" > "$f"; fi
+			"$JOBS/agh" call "$m" "$path" "$f"
+			[ -n "$f" ] && rm -f "$f"
+			;;
+		*) echo '{"error":"unknown action"}' ;;
+		esac
+		;;
+
+	modem_extra)
+		json_get_var action action
+		X="$JOBS/modem-extra"
+		case "$action" in
+		info) "$X" info ;;
+		bands) json_get_var b bands; "$X" bands "$b" ;;
+		sms_list) "$X" sms-list ;;
+		sms_send)
+			json_get_var n number; json_get_var tx text
+			f="$RUN/sms.$$"; umask 077; printf '%s\n%s' "$n" "$tx" > "$f"
+			"$X" sms-send "$f"; rm -f "$f" ;;
+		sms_delete) json_get_var i index; "$X" sms-delete "$i" ;;
+		time) "$X" time ;;
+		time_set) "$X" time-set ;;
+		band_test)
+			json_get_var b bands
+			case "$b" in ''|*[!a-z0-9\|-]*) echo '{"error":"bad band list"}'; exit 0 ;; esac
+			job_start bandtest "$X" band-test "$b" ;;
+		band_test_status) "$X" band-test-status ;;
+		band_test_stop) "$X" band-test-stop ;;
+		gps_status) "$X" gps-status ;;
+		gps_get) job_start gps "$X" gps-get ;;
+		gps_install) "$X" gps-install /tmp/home-ui-gps.tar.gz ;;
+		gps_remove) "$X" gps-remove ;;
+		*) echo '{"error":"unknown action"}' ;;
+		esac
+		;;
+
+	iot)
+		json_get_var action action
+		X="$JOBS/iot"
+		case "$action" in
+		info|remove|thread-dataset|thread-scan|ble-scan|thread-leave) "$X" "$action" ;;
+		install) "$X" install /tmp/home-ui-iot.tar.gz ;;
+		pair) job_start iotpair "$X" pair ;;
+		pair-status) job_state iotpair ;;
+		set)
+			json_get_var en enabled; json_get_var bl ble
+			[ -n "$en" ] && uci -q set home-ui-iot.main.enabled="$en"
+			[ -n "$bl" ] && uci -q set home-ui-iot.main.ble="$bl"
+			uci -q commit home-ui-iot
+			"$X" apply ;;
+		thread-form) json_get_var n name; "$X" thread-form "$n" ;;
+		thread-join) json_get_var d dataset; "$X" thread-join "$d" ;;
+		ble-adv) json_get_var o on; "$X" ble-adv "$([ "$o" = 1 ] && echo on || echo off)" ;;
+		*) echo '{"error":"unknown action"}' ;;
+		esac
+		;;
+
+	sysx)
+		json_get_var action action
+		X="$JOBS/sysx"
+		case "$action" in
+		stat|storage|tables|services|leds|pkg-list|pkg-upgradable|cron-get|night-get|tool-status) "$X" "$action" ;;
+		tool)
+			json_get_var t tool; json_get_var tg target; json_get_var c count; json_get_var six six
+			[ "$six" = 1 ] && six=6 || six=""
+			job_start tool "$X" tool "$t" "$tg" "$c" $six ;;
+		service) json_get_var n name; json_get_var a trigger; "$X" service "$n" "$a" ;;
+		cron-set)
+			json_get_var tx text
+			f="$RUN/cron.$$"; umask 077; printf '%s\n' "$tx" > "$f"
+			"$X" cron-set "$f"; rm -f "$f" ;;
+		pkg-search) json_get_var tx text; "$X" pkg-search "$tx" ;;
+		pkg)
+			json_get_var a trigger; json_get_var ns names
+			case "$a" in install|remove|upgrade) [ -n "$ns" ] || { echo '{"error":"no package"}'; exit 0; } ;; update) ns="" ;; *) echo '{"error":"bad action"}'; exit 0 ;; esac
+			if [ "$a" = remove ]; then
+				for p in $ns; do case "$p" in base-files|busybox|kernel|libc|musl|procd|procd-*|ubus|ubusd|rpcd|rpcd-*|uhttpd|uhttpd-*|netifd|uci|libuci*|libubox*|libubus*|apk|apk-*|opkg|firewall4|fstools|fwtool|jshn|jsonfilter|logd|mtd|dnsmasq|dnsmasq-*|odhcpd*|nftables*|luci-base|cgi-io|home-ui|kmod-*|wpad*|hostapd*|urandom-seed|urngd|openwrt-keyring|ca-bundle)
+					echo "{\"error\":\"$p is part of the router's core system and can't be removed here\"}"; exit 0 ;; esac; done
+			fi
+			job_start pkgx "$X" pkg "$a" $ns ;;
+		pkg-status) job_state pkgx ;;
+		led-set)
+			json_get_var n name; json_get_var t trigger; json_get_var b brightness; json_get_var k persist
+			"$X" led-set "$n" "$t" "$b" "$k" ;;
+		night) json_get_var a trigger; case "$a" in on|off) "$X" night "$a" ;; *) echo '{"error":"bad"}' ;; esac ;;
+		night-set) json_get_var e enabled; json_get_var off off; json_get_var on on; "$X" night-set "$e" "$off" "$on" ;;
+		*) echo '{"error":"unknown action"}' ;;
+		esac
+		;;
+
 	restart_service)
 		json_get_var name name
 		case "$name" in
-			modemmanager|network|firewall|dnsmasq|tailscale|https-dns-proxy|cbe-led|sbe-led|status-led) ;;
+			modemmanager|network|firewall|dnsmasq|tailscale|https-dns-proxy|cbe-led|sbe-led|status-led|miniupnpd|dropbear|uhttpd|adguardhome) ;;
 			*) echo '{"error":"not allowed"}'; exit 0 ;;
 		esac
 		[ -x "/etc/init.d/$name" ] || { echo '{"error":"not installed"}'; exit 0; }

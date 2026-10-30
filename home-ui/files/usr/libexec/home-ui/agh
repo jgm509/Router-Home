@@ -1,0 +1,102 @@
+#!/bin/sh
+# Router Home: talk to AdGuard Home's API on this router.
+#   agh info                      JSON: installed, running, port, signed in, curl
+#   agh login <user> <password>   check and remember the AdGuard Home sign-in
+#   agh logout
+#   agh call <GET|POST|PUT> <path> [body file]
+#                                 prints {"status":<http code>,"data":<answer>}
+# The sign-in is kept in /etc/home-ui/agh.auth (readable by root only).
+AUTH=/etc/home-ui/agh.auth
+RUN=/tmp/home-ui
+mkdir -p "$RUN" /etc/home-ui
+umask 077
+
+agh_pid() { pidof AdGuardHome 2>/dev/null | awk '{print $1}'; }
+
+yaml() {
+	local p c
+	p="$(agh_pid)"
+	if [ -n "$p" ]; then
+		# AdGuardHome -c <config> [-w <workdir>]
+		c="$(tr '\0' '\n' < /proc/$p/cmdline 2>/dev/null | awk 'f{print; exit} $0=="-c"||$0=="--config"{f=1}')"
+		[ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return; }
+	fi
+	for c in "$(uci -q get adguardhome.config.config_file)" /etc/adguardhome.yaml /etc/adguardhome/adguardhome.yaml \
+		/etc/AdGuardHome/AdGuardHome.yaml /etc/AdGuardHome.yaml /opt/AdGuardHome/AdGuardHome.yaml /usr/bin/AdGuardHome/AdGuardHome.yaml; do
+		[ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return; }
+	done
+}
+
+# where the web interface (and API) listens: host:port
+endpoint() {
+	local y a p
+	y="$(yaml)"
+	if [ -n "$y" ]; then
+		a="$(awk '/^http:/{h=1; next} h && /^[^ \t]/{h=0} h && /^[ \t]+address:/{print $2; exit}' "$y")"
+		[ -n "$a" ] || { p="$(awk '/^bind_port:/{print $2; exit}' "$y")"; h="$(awk '/^bind_host:/{print $2; exit}' "$y")"; [ -n "$p" ] && a="${h:-0.0.0.0}:$p"; }
+	fi
+	[ -n "$a" ] || a="0.0.0.0:3000"
+	p="${a##*:}"; a="${a%:*}"
+	case "$a" in 0.0.0.0|::|'['*|'') a=127.0.0.1 ;; esac
+	echo "$a:$p"
+}
+
+installed() { [ -x /etc/init.d/adguardhome ] || [ -x /etc/init.d/AdGuardHome ] || command -v AdGuardHome >/dev/null 2>&1 || [ -n "$(agh_pid)" ]; }
+
+curlrc() {	# $1 user, $2 password -> curl config file
+	local f="$RUN/agh.curlrc"
+	printf 'user = "%s:%s"\n' "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')" "$(printf '%s' "$2" | sed 's/[\\"]/\\&/g')" > "$f"
+	echo "$f"
+}
+
+request() {	# method path bodyfile user pass -> body, then the HTTP code on the last line
+	local rc
+	rc="$(curlrc "$4" "$5")"
+	if [ -n "$3" ]; then
+		curl -s -m 25 -K "$rc" -X "$1" -H 'Content-Type: application/json' --data-binary "@$3" -w '\n%{http_code}' "http://$(endpoint)$2"
+	else
+		curl -s -m 25 -K "$rc" -X "$1" -w '\n%{http_code}' "http://$(endpoint)$2"
+	fi
+	rm -f "$rc"
+}
+
+esc() { printf '%s' "$1" | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); gsub(/\r/,""); if (NR>1) printf "\\n"; print}'; }
+
+case "$1" in
+info)
+	run=false; [ -n "$(agh_pid)" ] && run=true
+	inst=false; installed && inst=true
+	cu=false; command -v curl >/dev/null 2>&1 && cu=true
+	signed=false; [ -s "$AUTH" ] && signed=true
+	ep="$(endpoint)"
+	printf '{"installed":%s,"running":%s,"curl":%s,"signed_in":%s,"port":%s,"config":"%s","luci":%s}\n' \
+		"$inst" "$run" "$cu" "$signed" "${ep##*:}" "$(esc "$(yaml)")" "$([ -f /usr/share/luci/menu.d/luci-app-adguardhome.json ] && echo true || echo false)"
+	;;
+login)
+	command -v curl >/dev/null 2>&1 || { echo '{"error":"curl is needed"}'; exit 0; }
+	out="$(request GET /control/status "" "$2" "$3")"
+	code="$(echo "$out" | tail -n 1)"
+	case "$code" in
+		200) printf '%s\n%s\n' "$2" "$3" > "$AUTH"; chmod 600 "$AUTH"; echo '{"ok":true}' ;;
+		401|403) echo '{"error":"Wrong user name or password"}' ;;
+		000) echo '{"error":"AdGuard Home does not answer. Is it running?"}' ;;
+		*) printf '{"error":"AdGuard Home answered %s"}\n' "$code" ;;
+	esac
+	;;
+logout) rm -f "$AUTH"; echo '{"ok":true}' ;;
+call)
+	command -v curl >/dev/null 2>&1 || { echo '{"error":"curl is needed"}'; exit 0; }
+	[ -s "$AUTH" ] || { echo '{"error":"signin"}'; exit 0; }
+	u="$(sed -n 1p "$AUTH")"; p="$(sed -n 2p "$AUTH")"
+	out="$(request "$2" "$3" "$4" "$u" "$p")"
+	code="$(echo "$out" | tail -n 1)"
+	body="$(echo "$out" | sed '$d')"
+	[ "$code" = 401 ] && { echo '{"error":"signin"}'; exit 0; }
+	[ "$code" = 000 ] && { echo '{"error":"AdGuard Home does not answer. Is it running?"}'; exit 0; }
+	case "$body" in
+		\{*|\[*) printf '{"status":%s,"data":%s}\n' "$code" "$body" ;;
+		*) printf '{"status":%s,"data":"%s"}\n' "$code" "$(esc "$body")" ;;
+	esac
+	;;
+*) sed -n '2,9p' "$0"; exit 1 ;;
+esac

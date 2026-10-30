@@ -50,10 +50,15 @@ rm -rf "$R/www/home.old"
 ( cd "$SRC" && find . -type d ) | while read -r d; do [ -d "$R/$d" ] && chmod a+rx "$R/$d"; done
 ( cd "$SRC" && find . -type f ) | while read -r f; do [ -f "$R/$f" ] && chmod a+r "$R/$f"; done
 
-for f in /usr/libexec/rpcd/home-ui /usr/libexec/home-ui/esim-job /usr/libexec/home-ui/self-update /usr/libexec/home-ui/fullbackup /usr/libexec/home-ui/restore-finish /usr/libexec/home-ui/addon /usr/sbin/home-ui-fan /usr/sbin/home-ui-fan-gpio /usr/sbin/home-ui-light /etc/init.d/home-ui-fan /etc/init.d/home-ui-light; do
+for f in /usr/libexec/rpcd/home-ui /usr/libexec/home-ui/esim-job /usr/libexec/home-ui/self-update /usr/libexec/home-ui/fullbackup /usr/libexec/home-ui/restore-finish /usr/libexec/home-ui/pkg-install /usr/libexec/home-ui/sta160 /usr/libexec/home-ui/diagnose /usr/libexec/home-ui/diag-fix /usr/libexec/home-ui/goodconf /usr/libexec/home-ui/soft-reset /usr/libexec/home-ui/agh /usr/libexec/home-ui/modem-extra /usr/libexec/home-ui/addon /usr/sbin/home-ui-fan /usr/sbin/home-ui-fan-gpio /usr/sbin/home-ui-light /etc/init.d/home-ui-fan /etc/init.d/home-ui-light /etc/init.d/home-ui-guard; do
 	[ -f "$R$f" ] && chmod 755 "$R$f"
 done
 [ -z "$R" ] && [ -x /etc/init.d/home-ui-fan ] && /etc/init.d/home-ui-fan enable >/dev/null 2>&1
+[ -z "$R" ] && [ -x /etc/init.d/home-ui-guard ] && { /etc/init.d/home-ui-guard enable; /etc/init.d/home-ui-guard restart; } >/dev/null 2>&1
+# LuCI caches its menu; clear it so the "Simple mode" entry moves right away
+[ -z "$R" ] && rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null
+# WiFi uplink fix for ath11k at 160 MHz, for a connection that is already up
+[ -z "$R" ] && [ -x /usr/libexec/home-ui/sta160 ] && /usr/libexec/home-ui/sta160
 # add-ons made for this router model (for example its fan or light)
 [ -z "$R" ] && [ -x /usr/libexec/home-ui/addon ] && /usr/libexec/home-ui/addon autoinstall
 

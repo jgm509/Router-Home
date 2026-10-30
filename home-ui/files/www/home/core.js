@@ -91,6 +91,14 @@ const App = (() => {
 			return r.section;
 		},
 		remove(config, section) { return rpc('uci', 'delete', { config, section }); },
+		/* WiFi networks get a name (wifinet0, wifinet1, …) like LuCI gives them;
+		 * unnamed ones make LuCI ask to "migrate" the wireless settings */
+		async addWifi(values) {
+			const w = await this.load('wireless');
+			let i = 0;
+			while (w['wifinet' + i]) i++;
+			return this.add('wireless', 'wifi-iface', values, 'wifinet' + i);
+		},
 		/* commit staged changes and reload services; rolls back by itself
 		 * after 30 s if the browser can't reach the router to confirm. */
 		async apply(message) {
@@ -195,7 +203,24 @@ const App = (() => {
 		user: 'M12 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 21a8 8 0 0 1 16 0',
 		edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
 		fan: 'M12 12m-1.6 0a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0M12 10.4C12 6 13 3 15.5 3.5 18 4 16 8.5 13.4 11.2M13.6 12c4.4 0 7.4 1 6.9 3.5-.5 2.5-5 .5-7.7-2.1M12 13.6c0 4.4-1 7.4-3.5 6.9-2.5-.5-.5-5 2.1-7.7M10.4 12C6 12 3 11 3.5 8.5 4 6 8.5 8 11.2 10.6',
-		antenna: 'M12 10v11M8 21h8M8.5 6.5a5 5 0 0 1 7 0M5.6 3.6a9 9 0 0 1 12.8 0M12 10h.01'
+		antenna: 'M12 10v11M8 21h8M8.5 6.5a5 5 0 0 1 7 0M5.6 3.6a9 9 0 0 1 12.8 0M12 10h.01',
+		dashboard: 'M4 4h7v9H4zM13 4h7v5h-7zM13 11h7v9h-7zM4 15h7v5H4z',
+		interfaces: 'M9 3h6v5H9zM3 16h6v5H3zM15 16h6v5h-6zM12 8v4M6 16v-2h12v2',
+		more: 'M5 12h.01M12 12h.01M19 12h.01',
+		cpu: 'M7 7h10v10H7zM10 10h4v4h-4zM9 3v4M15 3v4M9 17v4M15 17v4M3 9h4M3 15h4M17 9h4M17 15h4',
+		memory: 'M3 7h18v10H3zM7 10v4M11 10v4M15 10v4M6 17v3M18 17v3',
+		chart: 'M3 20h18M5 16l4-5 4 3 6-8',
+		storage: 'M6 3h9l4 4v14H6zM9 8h1M12 8h1M15 8h1',
+		tools: 'M3 12h4l2-6 4 12 2-6h6',
+		services: 'M4 6h10M4 12h10M4 18h7M17 15l2 2 3-4M17 5.5l2 2 3-4',
+		package: 'M3 7l9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10M7.5 5l9 4',
+		palette: 'M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.5 0-1.2-1-1.4-1-2.5 0-.8.7-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4-4-7.5-9-7.5zM7.5 11h.01M10 7h.01M15 7h.01',
+		thermo: 'M10 14V5a2 2 0 0 1 4 0v9a4 4 0 1 1-4 0zM12 11v6',
+		search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4',
+		gauge: 'M12 13l4-4M4 18a9 9 0 1 1 16 0',
+		up: 'M12 19V5M6 11l6-6 6 6',
+		check: 'M5 12.5l4.5 4.5L19 7.5',
+		down: 'M12 5v14M6 13l6 6 6-6'
 	};
 	function icon(name, cls) {
 		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -234,7 +259,17 @@ const App = (() => {
 		return el;
 	}
 	const group = (...rows) => h('div', { class: 'group' }, rows);
-	const sectionTitle = (text, extra) => h('h2', { class: 'section-title' }, h('span', text), extra || null);
+	const sectionTitle = (text, extra, ic) => h('h2', { class: 'section-title' + (ic ? ' with-icon' : '') }, h('span', ic ? icon(ic, 'st-ic') : null, text), extra || null);
+	/* a small "?" that explains a complicated setting in plain words.
+	 * parts: strings (paragraphs), or nodes; {rec: '...'} adds a "Recommended" line */
+	function explain(title, ...parts) {
+		return h('button', { type: 'button', class: 'explain', 'aria-label': `About ${title}`, onclick: e => {
+			e.preventDefault(); e.stopPropagation();
+			sheet(title, close => h('div', parts.map(p => typeof p === 'string' ? h('p', { class: 'explain-text' }, p)
+				: p && p.rec ? h('div', { class: 'note' }, h('strong', 'Recommended: '), p.rec) : p),
+				h('div', { class: 'actions' }, btn('Got it', close))));
+		} }, '?');
+	}
 	const hint = text => h('p', { class: 'hint' }, text);
 	const note = (text, kind) => h('div', { class: 'note' + (kind ? ' ' + kind : '') }, text);
 
@@ -307,6 +342,7 @@ const App = (() => {
 		const close = () => {
 			if (closed) return; closed = true;
 			bd.remove();
+			if (!root.children.length) document.body.classList.remove('sheet-open');
 			document.removeEventListener('keydown', onKey);
 			o && o.onClose && o.onClose();
 			prevFocus && prevFocus.focus && prevFocus.focus();
@@ -322,6 +358,8 @@ const App = (() => {
 		const bd = h('div', { class: 'sheet-backdrop', onclick: e => { if (e.target === bd && !(o && o.modal)) close(); } }, box);
 		append(body, [ typeof content === 'function' ? content(close, body) : content ]);
 		root.appendChild(bd);
+		/* the page behind doesn't scroll while a sheet is open */
+		document.body.classList.add('sheet-open');
 		document.addEventListener('keydown', onKey);
 		setTimeout(() => { const f = box.querySelector('input:not([type=checkbox]),select,textarea'); (f || box.querySelector('.sheet-head button')).focus({ preventScroll: true }); }, 50);
 		return { close, body, box };
@@ -386,12 +424,15 @@ const App = (() => {
 
 	const views = [];
 	const TABS = [
-		['home', 'Home', 'home'],
-		['devices', 'Devices', 'devices'],
-		['wifi', 'WiFi', 'wifi'],
-		['network', 'Internet', 'network'],
-		['system', 'System', 'system']
+		['network', 'Interfaces', 'interfaces'],
+		['devices', 'Clients', 'devices'],
+		['home', 'Dashboard', 'dashboard'],
+		['wifi', 'Wireless', 'wifi'],
+		['more', 'More', 'more']
 	];
+	/* pages reached from "More" light up the More tab */
+	const tabFor = (name, sub) => TABS.some(t => t[0] === name) && !(name === 'network' && /^(firewall|lans|adguard|check|security)$/.test(sub || '')) ? name : 'more';
+	let prevHash = '', lastHash = '';
 	let current = null, timers = [], aborts = [];
 
 	function register(name, def) { views[name] = def; }
@@ -416,12 +457,14 @@ const App = (() => {
 		if (!sid) return showLogin();
 		const parts = location.hash.replace(/^#\/?/, '').split('/');
 		const name = views[parts[0]] ? parts[0] : 'home';
+		if (location.hash !== lastHash) { prevHash = lastHash; lastHash = location.hash; }
 		timers.forEach(s => s()); timers = [];
-		$('#sheet-root').replaceChildren();
+		$('#sheet-root').replaceChildren(); document.body.classList.remove('sheet-open');
 		document.body.classList.remove('login-mode');
 		$('#app').classList.remove('booting', 'login-mode');
+		const tab = tabFor(name, parts[1]);
 		for (const a of $('#tabs').querySelectorAll('a[data-tab]')) {
-			if (a.dataset.tab === name) a.setAttribute('aria-current', 'page');
+			if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page');
 			else a.removeAttribute('aria-current');
 		}
 		const view = $('#view');
@@ -442,15 +485,26 @@ const App = (() => {
 		const nav = $('#tabs');
 		smart(nav).replaceChildren(
 			h('div', { class: 'brand' }, h('span', { class: 'lamp online', style: { width: '22px', height: '22px', boxShadow: 'none' } }), info.hostname || 'Router'),
-			TABS.map(([id, label, ic]) => h('a', { href: '#/' + id, 'data-tab': id }, icon(ic), h('span', label)))
+			TABS.map(([id, label, ic]) => h('a', { href: '#/' + id, 'data-tab': id, class: id === 'home' ? 'center' : null },
+				h('span', { class: 'tab-ic' }, icon(ic), h('i', { class: 'tab-badge', hidden: true })), h('span', { class: 'tab-label' }, label)))
 		);
+	}
+	function setBadge(tab, n) {
+		const b = $('#tabs').querySelector(`a[data-tab="${tab}"] .tab-badge`);
+		if (!b) return;
+		b.hidden = !n; b.textContent = n > 99 ? '99+' : String(n || '');
+	}
+	/* where a "back" link should go: the page the user came from, when it was "More" */
+	function backTo(def, defLabel) {
+		if (/^#\/more\/?$/.test(prevHash)) return ['#/more', 'More'];
+		return [def, defLabel];
 	}
 
 	/* ---------------- login ---------------- */
 
 	function showLogin(msg) {
 		timers.forEach(s => s()); timers = [];
-		$('#sheet-root').replaceChildren();
+		$('#sheet-root').replaceChildren(); document.body.classList.remove('sheet-open');
 		$('#app').classList.add('login-mode');
 		$('#app').classList.remove('booting');
 		const user = input({ name: 'username', value: 'root', autocomplete: 'username' });
@@ -505,7 +559,15 @@ const App = (() => {
 	pwa.standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true || /RouterHomeApp/.test(navigator.userAgent);
 	pwa.secure = () => window.isSecureContext;
 
+	function syncSheetOpen() {
+		const r = $('#sheet-root');
+		document.body.classList.toggle('sheet-open', !!(r && r.children.length));
+	}
 	function start() {
+		new MutationObserver(syncSheetOpen).observe($('#sheet-root'), { childList: true });
+		document.addEventListener('visibilitychange', syncSheetOpen);
+		window.addEventListener('pageshow', syncSheetOpen);
+		window.addEventListener('focus', syncSheetOpen);
 		if ('serviceWorker' in navigator && window.isSecureContext)
 			navigator.serviceWorker.register('sw.js', { scope: './' }).catch(e => console.warn('service worker', e));
 		window.addEventListener('hashchange', route);
@@ -517,8 +579,8 @@ const App = (() => {
 	}
 
 	return {
-		start, rpc, call, uci, h, $, icon, row, group, sectionTitle, hint, note, field, input, password, select, toggle, seg, btn, busy,
-		toast, sheet, confirm: confirmBox, qrSvg, fmt, register, every, go, route, info, sleep, logout, RpcError, pwa,
+		start, rpc, call, uci, h, $, icon, row, group, sectionTitle, explain, hint, note, field, input, password, select, toggle, seg, btn, busy,
+		toast, sheet, confirm: confirmBox, qrSvg, fmt, register, every, go, route, info, sleep, logout, RpcError, pwa, setBadge, backTo,
 		get sid() { return sid; }
 	};
 })();
