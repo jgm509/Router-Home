@@ -1,9 +1,0 @@
-{
-	"id": "spectrum-sax1v1k-light",
-	"name": "Spectrum SAX1V1K front light",
-	"version": "1.0.4",
-	"author": "Router Home contributors",
-	"description": "Shows the internet status on the SAX1V1K's RGB front LED (red GPIO 25, green GPIO 32, blue GPIO 26): blue = internet through WAN, white = through a mobile modem, yellow = no internet, red = offline. OpenWrt only describes red and blue; until green is added to OpenWrt, it is switched with gpioset (installed automatically if missing).",
-	"boards": ["spectrum,sax1v1k"],
-	"provides": { "led": true }
-}

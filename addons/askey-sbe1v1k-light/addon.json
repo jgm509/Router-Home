@@ -1,9 +1,0 @@
-{
-	"id": "askey-sbe1v1k-light",
-	"name": "Askey SBE1V1K front light",
-	"version": "1.0.1",
-	"author": "Router Home contributors",
-	"description": "Drives the SBE1V1K's RGB front LED (three PWM LEDs, red:status, green:status and blue:status) with any colour and brightness: blue = internet through WAN, white = through a mobile modem, yellow = no internet, red = offline. Needs the pwm-leds device tree (OneNAS tree, or the fix from OpenWrt issue 26099).",
-	"boards": ["askey,sbe1v1k"],
-	"provides": { "led": true }
-}
