@@ -1,0 +1,46 @@
+#!/bin/sh
+# Router Home add-on handler: Askey SBE1V1K front light (PWM RGB)
+#   handler led info | set | test   (JSON on stdin)
+. /usr/share/libubox/jshn.sh
+json_load "$(cat)"
+
+case "$1 $2" in
+"led info")
+	en=true; [ "$(uci -q get sbe-rgb-led.main.enabled)" = 0 ] && en=false
+	# dimming needs the pwm-leds device tree (max_brightness 255); firmware
+	# with the older gpio-leds one can only switch each colour on or off
+	br=$(uci -q get sbe-rgb-led.main.brightness || echo 96)
+	for d in /sys/class/leds/*red*status* /sys/class/leds/*red*; do [ -f "$d/max_brightness" ] && break; done
+	[ "$(cat "$d/max_brightness" 2>/dev/null || echo 1)" -gt 1 ] 2>/dev/null || br=null
+	cat <<J
+{"enabled":$en,"brightness":$br,
+ "description":"Blue: WAN · white: mobile modem · yellow: no internet · red: offline",
+ "colors":[{"id":"blue","label":"WAN","css":"#3b7cff"},{"id":"white","label":"Mobile","css":"#f2f5f8"},
+  {"id":"yellow","label":"No internet","css":"#f0b429"},{"id":"red","label":"Offline","css":"#ff4d55"},
+  {"id":"green","label":"Green","css":"#2fbf71"},{"id":"cyan","label":"Cyan","css":"#2ad4e0"},
+  {"id":"magenta","label":"Magenta","css":"#d24dff"},
+  {"id":"breath","label":"Starting","css":"linear-gradient(#fff,#8899aa)"}]}
+J
+	;;
+"led set")
+	json_get_var enabled enabled
+	json_get_var brightness brightness
+	[ "$enabled" = 1 ] || enabled=0
+	uci -q set sbe-rgb-led.main.enabled="$enabled"
+	[ "$brightness" -ge 1 ] 2>/dev/null && [ "$brightness" -le 255 ] && uci -q set sbe-rgb-led.main.brightness="$brightness"
+	uci -q commit sbe-rgb-led
+	/etc/init.d/sbe-rgb-led restart >/dev/null 2>&1
+	[ "$enabled" = 0 ] && /usr/bin/sbe-rgb-led off >/dev/null 2>&1
+	echo '{"ok":true}'
+	;;
+"led test")
+	json_get_var color color
+	case "$color" in white|red|green|blue|yellow|cyan|magenta|breath|off) ;; *) color=white ;; esac
+	/etc/init.d/sbe-rgb-led stop >/dev/null 2>&1
+	/usr/bin/sbe-rgb-led "$color" >/dev/null 2>&1
+	( sleep 4; [ "$(uci -q get sbe-rgb-led.main.enabled)" = 0 ] || /etc/init.d/sbe-rgb-led start >/dev/null 2>&1 ) </dev/null >/dev/null 2>&1 &
+	echo '{"ok":true}'
+	;;
+*)
+	echo '{"error":"not supported"}' ;;
+esac

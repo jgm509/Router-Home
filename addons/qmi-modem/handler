@@ -1,0 +1,42 @@
+#!/bin/sh
+# Router Home add-on handler: modem status through uqmi
+#   handler modem status  ->  {"simple":{...}}  (format in ADDONS.md)
+cat >/dev/null
+
+dev="$(uci -q show network | sed -n "s/^network\.\([^.]*\)\.proto='qmi'$/\1/p" | head -n1)"
+iface="$dev"
+dev="$(uci -q get network.$iface.device)"
+[ -c "$dev" ] || dev="$(ls /dev/cdc-wdm* 2>/dev/null | head -n1)"
+[ -c "$dev" ] || { echo '{"error":"No QMI modem device found"}'; exit 0; }
+
+q() { uqmi -s -d "$dev" "$@" 2>/dev/null; }
+case "$1 $2" in
+"modem status")
+	sig="$(q --get-signal-info)"
+	srv="$(q --get-serving-system)"
+	imei="$(q --get-imei | tr -d '"')"
+	model="$(q --get-capabilities | jsonfilter -e '@.model' 2>/dev/null)"
+	st="$(ifstatus "$iface" 2>/dev/null)"
+	up="$(echo "$st" | jsonfilter -e '@.up' 2>/dev/null)"
+	ip="$(echo "$st" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	type="$(echo "$sig" | jsonfilter -e '@.type' 2>/dev/null)"
+	rsrp="$(echo "$sig" | jsonfilter -e '@.rsrp' 2>/dev/null)"
+	rsrq="$(echo "$sig" | jsonfilter -e '@.rsrq' 2>/dev/null)"
+	snr="$(echo "$sig" | jsonfilter -e '@.snr' 2>/dev/null)"
+	rssi="$(echo "$sig" | jsonfilter -e '@.rssi' 2>/dev/null)"
+	reg="$(echo "$srv" | jsonfilter -e '@.registration' 2>/dev/null)"
+	op="$(echo "$srv" | jsonfilter -e '@.plmn_description' 2>/dev/null)"
+	roam="$(echo "$srv" | jsonfilter -e '@.roaming' 2>/dev/null)"
+	# signal quality 0-100 from RSRP (-120..-70 dBm), else RSSI (-110..-50)
+	if [ -n "$rsrp" ]; then qual=$(( (${rsrp%.*} + 120) * 2 )); elif [ -n "$rssi" ]; then qual=$(( (${rssi%.*} + 110) * 100 / 60 )); else qual=0; fi
+	[ $qual -lt 0 ] && qual=0; [ $qual -gt 100 ] && qual=100
+	case "$reg" in registered) [ "$roam" = true ] && reg=roaming || reg=home ;; searching) ;; registration_denied) reg=denied ;; *) reg=idle ;; esac
+	case "$type" in lte) tech=lte; blk=lte ;; 5gnr|nr5g) tech=5gnr; blk=nr ;; wcdma|umts) tech=umts; blk="" ;; gsm) tech=gsm; blk="" ;; *) tech="$type"; blk="" ;; esac
+	sigblk=""
+	[ -n "$blk" ] && [ -n "$rsrp" ] && sigblk=",\"$blk\":{\"rsrp\":$rsrp,\"rsrq\":${rsrq:-null},\"sinr\":${snr:-null}}"
+	printf '{"simple":{"carrier":"%s","state":"%s","tech":"%s","quality":%s,"registration":"%s","ip":"%s","imei":"%s","model":"%s"%s},"source":"uqmi"}\n' \
+		"$op" "$([ "$up" = true ] && echo connected || echo registered)" "$tech" "$qual" "$reg" "$ip" "$imei" "$model" "$sigblk"
+	;;
+*)
+	echo '{"error":"not supported"}' ;;
+esac

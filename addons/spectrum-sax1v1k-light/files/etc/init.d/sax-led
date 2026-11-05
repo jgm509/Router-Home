@@ -1,0 +1,30 @@
+#!/bin/sh /etc/rc.common
+# Front LED status for Spectrum SAX1V1K
+
+START=19
+STOP=90
+USE_PROCD=1
+
+boot() {
+	# early: show "booting" right away
+	/usr/bin/sax-led breath >/dev/null 2>&1
+	start "$@"
+}
+
+start_service() {
+	# the service runs whatever the setting is: it switches the light
+	# off by itself when sax-led.main.enabled is 0
+	procd_open_instance
+	procd_set_param command /usr/sbin/sax-led-status
+	procd_set_param respawn
+	procd_close_instance
+}
+
+stop_service() {
+	rm -f /var/run/sax-led.hold
+	/usr/bin/sax-led off >/dev/null 2>&1
+}
+
+service_triggers() {
+	procd_add_reload_trigger sax-led
+}

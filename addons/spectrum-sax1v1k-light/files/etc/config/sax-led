@@ -1,0 +1,11 @@
+config led 'main'
+	option enabled '1'
+	# hosts used to test internet access
+	list check_host '1.1.1.1'
+	list check_host '8.8.8.8'
+	# seconds between checks
+	option interval '15'
+	# interfaces that count as a mobile modem (white); anything else is WAN (blue)
+	option modem_devices 'wwan* mhi_* wwp* usb* rmnet*'
+	# GPIO of the green LED, used when the firmware has no green status LED
+	option green_gpio '32'

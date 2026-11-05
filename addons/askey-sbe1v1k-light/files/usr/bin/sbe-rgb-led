@@ -1,0 +1,45 @@
+#!/bin/sh
+# sbe-rgb-led: set the Askey SBE1V1K front LED (PWM red/green/blue, 0-255 each)
+# Usage: sbe-rgb-led <off|white|red|green|blue|yellow|cyan|magenta|breath> [level 1-255]
+
+LVL="${2:-$(uci -q get sbe-rgb-led.main.brightness || echo 96)}"
+GB="$(uci -q get sbe-rgb-led.main.green_balance || echo 18)"
+case "$LVL" in ''|*[!0-9]*) LVL=96 ;; esac
+[ "$LVL" -gt 255 ] && LVL=255
+case "$GB" in ''|*[!0-9]*) GB=18 ;; esac
+
+led() {	# path of the LED of colour $1
+	local d
+	for d in /sys/class/leds/$1:status /sys/class/leds/*$1*status* /sys/class/leds/*$1*; do
+		[ -d "$d" ] && { echo "$d"; return 0; }
+	done
+	return 1
+}
+R="$(led red)"; G="$(led green)"; B="$(led blue)"
+[ -n "$R$G$B" ] || { echo "no red/green/blue status LED found" >&2; exit 1; }
+
+put() {	# put <led> <0|1 share> [timer]
+	[ -n "$1" ] || return 0
+	local v=0
+	[ "$2" = 1 ] && v="$LVL"
+	[ "$2" = 1 ] && [ "$1" = "$G" ] && v=$(( (LVL * GB + 99) / 100 ))
+	echo none > "$1/trigger" 2>/dev/null
+	echo "$v" > "$1/brightness"
+	if [ "$3" = timer ] && [ "$v" -gt 0 ]; then
+		echo timer > "$1/trigger" 2>/dev/null && { echo 1200 > "$1/delay_on"; echo 800 > "$1/delay_off"; }
+	fi
+}
+rgb() { put "$R" "$1" "$4"; put "$G" "$2" "$4"; put "$B" "$3" "$4"; }
+
+case "$1" in
+	off)     rgb 0 0 0 ;;
+	white)   rgb 1 1 1 ;;
+	red)     rgb 1 0 0 ;;
+	green)   rgb 0 1 0 ;;
+	blue)    rgb 0 0 1 ;;
+	yellow)  rgb 1 1 0 ;;
+	cyan)    rgb 0 1 1 ;;
+	magenta) rgb 1 0 1 ;;
+	breath)  rgb 1 1 1 timer ;;
+	*) echo "usage: $0 <off|white|red|green|blue|yellow|cyan|magenta|breath> [level 1-255]"; exit 1 ;;
+esac

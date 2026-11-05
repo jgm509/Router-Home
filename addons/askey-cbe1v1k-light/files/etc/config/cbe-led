@@ -1,0 +1,11 @@
+config led 'main'
+	option enabled '1'
+	# brightness 1-255
+	option brightness '96'
+	# hosts used to test internet access
+	list check_host '1.1.1.1'
+	list check_host '8.8.8.8'
+	# seconds between checks
+	option interval '15'
+	# interfaces that count as the 5G modem (white); anything else is WAN (blue)
+	option modem_devices 'wwan* mhi_*'
