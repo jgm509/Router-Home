@@ -142,7 +142,7 @@ list)
 		"soft_reset": { "keep_uplink": true },
 		"agh": { "action": "str", "method": "str", "path": "str", "body": "str", "user": "str", "pass": "str" },
 		"modem_extra": { "action": "str", "bands": "str", "number": "str", "text": "str", "index": 0 },
-		"iot": { "action": "str", "name": "str", "dataset": "str", "on": true, "enabled": true, "ble": true },
+		"iot": { "action": "str", "name": "str", "dataset": "str", "on": true, "enabled": true, "ble": true, "zigbee": true, "firmware": "str" },
 		"sysx": { "action": "str", "name": "str", "tool": "str", "target": "str", "count": 4, "six": true, "text": "str", "names": "str", "trigger": "str", "brightness": 0, "persist": true, "enabled": true, "off": "str", "on": "str" }
 	}
 	EOF
@@ -863,14 +863,18 @@ $(brctl showmacs "${br##*/}" 2>/dev/null | awk -v ports="$ports" 'NR>1 && $3=="n
 		json_get_var action action
 		X="$JOBS/iot"
 		case "$action" in
-		info|remove|thread-dataset|thread-scan|ble-scan|thread-leave) "$X" "$action" ;;
+		info|remove|thread-dataset|thread-scan|ble-scan|thread-leave|takeover) "$X" "$action" ;;
 		install) "$X" install /tmp/home-ui-iot.tar.gz ;;
 		pair) job_start iotpair "$X" pair ;;
 		pair-status) job_state iotpair ;;
+		detect) job_start iotdetect "$X" detect ;;
+		detect-status) job_state iotdetect ;;
 		set)
-			json_get_var en enabled; json_get_var bl ble
+			json_get_var en enabled; json_get_var bl ble; json_get_var zb zigbee; json_get_var fw firmware
 			[ -n "$en" ] && uci -q set home-ui-iot.main.enabled="$en"
 			[ -n "$bl" ] && uci -q set home-ui-iot.main.ble="$bl"
+			[ -n "$zb" ] && uci -q set home-ui-iot.main.zigbee="$zb"
+			case "$fw" in auto|stock|multipan|rcp) uci -q set home-ui-iot.main.firmware="$fw"; rm -f /tmp/home-ui/iot-picks ;; esac
 			uci -q commit home-ui-iot
 			"$X" apply ;;
 		thread-form) json_get_var n name; "$X" thread-form "$n" ;;

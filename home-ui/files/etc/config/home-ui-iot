@@ -1,4 +1,7 @@
 config iot 'main'
-	# Thread + Bluetooth radio (Askey SBE1V1K / EBE1V1K / CBE1V1K), set in Router Home
+	# Thread, Bluetooth LE and Zigbee radio (Askey SBE1V1K / EBE1V1K / CBE1V1K), set in Router Home
 	option enabled '0'
 	option ble '1'
+	option zigbee '0'
+	# auto: the firmware "Detect" found; or stock, multipan, rcp
+	option firmware 'auto'

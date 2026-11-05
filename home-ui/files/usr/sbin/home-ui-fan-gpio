@@ -27,7 +27,7 @@ TACH="$(fan_tach)"
 STATE=/tmp/home-ui/fan-state
 RPMF=/tmp/home-ui/fan-rpm
 mkdir -p /tmp/home-ui
-HOLD=""; cur=""
+HOLD=""; cur=""; MON=""
 
 if gpioset --help 2>&1 | grep -q -- '--toggle'; then V2=1; else V2=0; fi
 
@@ -72,8 +72,8 @@ measure_rpm() {
 	[ -n "$TACH" ] && [ $V2 = 1 ] && command -v gpiomon >/dev/null || return
 	[ "$cur" = 0 ] && return
 	gpiomon -c "$CHIP" -b pull-up -e falling "$TACH" > /tmp/home-ui/tach 2>/dev/null &
-	local m=$!
-	sleep 2; kill "$m" 2>/dev/null; wait "$m" 2>/dev/null
+	MON=$!
+	sleep 2; kill "$MON" 2>/dev/null; wait "$MON" 2>/dev/null; MON=""
 	echo $(( $(wc -l < /tmp/home-ui/tach) * 15 )) > "$RPMF"
 }
 
@@ -96,12 +96,14 @@ auto_speed() {
 	echo "$want"
 }
 
-# release any line holder left from an earlier run
+# release any line holder left from an earlier run: the fan pin, and a speed
+# sensor counter that would keep the sensor pin busy (and spoil the count)
 for p in $(pgrep -f "gpioset .*${PIN}=" 2>/dev/null); do kill "$p" 2>/dev/null; done
+[ -n "$TACH" ] && for p in $(pgrep -f "gpiomon .* ${TACH}\$" 2>/dev/null); do kill "$p" 2>/dev/null; done
 sleep 1
 
 # on stop: full speed, then release the line (the pin keeps its level)
-trap 'set_fan 100 "service stopped"; sleep 1; kill "$HOLD" 2>/dev/null; exit 0' TERM INT
+trap '[ -n "$MON" ] && kill "$MON" 2>/dev/null; set_fan 100 "service stopped"; sleep 1; kill "$HOLD" 2>/dev/null; exit 0' TERM INT
 
 n=0
 while true; do

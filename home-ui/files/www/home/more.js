@@ -55,7 +55,7 @@ const More = (() => {
 				fan && fan.available ? row({ icon: 'fan', label: 'Fan', sub, onClick: () => openFan(() => call('home-ui', 'fan_status').then(f => { sub.textContent = fanSummary(f); })) }) :
 					row({ icon: 'fan', label: 'Fan', sub: fan && fan.missing ? `Needs ${fan.missing}` : 'No controllable fan found', disabled: true }),
 				row({ icon: 'light', label: 'Lights', sub: 'Every LED, night mode', href: '#/more/lights' }),
-				info.iot ? row({ icon: 'antenna', label: 'Thread & Bluetooth', sub: 'Smart-home radio: Thread border router, Bluetooth LE', href: '#/more/iot' }) : null),
+				info.iot ? row({ icon: 'antenna', label: 'Thread, Bluetooth & Zigbee', sub: 'Smart-home radio: Thread border router, Bluetooth LE, Zigbee', href: '#/more/iot' }) : null),
 			lbl('Software'),
 			group(
 				row({ icon: 'services', label: 'Services & schedules', sub: 'Start, stop, run at boot, scheduled tasks', href: '#/more/services' }),
@@ -641,81 +641,163 @@ const More = (() => {
 	}
 
 
-	/* ======================= Thread & Bluetooth ======================= */
+	/* ================= Thread, Bluetooth & Zigbee ================= */
 	const iotc = (action, p) => App.call('home-ui', 'iot', Object.assign({ action }, p || {}));
 	const ROLE = { leader: ['Leader', ''], router: ['Router', ''], child: ['Connected (end device)', ''], detached: ['Looking for the network', 'warn'], disabled: ['Off', 'mute'] };
+	const FW = {
+		stock: ['Stock firmware', 'Thread and Bluetooth LE'],
+		multipan: ['Multiprotocol firmware', 'Thread, Bluetooth LE and Zigbee'],
+		rcp: ['OpenThread RCP firmware', 'Thread only']
+	};
 	async function iotPage(page) {
-		const { h, btn, busy, icon, toggle, toast, confirm, sleep, field, input, sheet, every } = App;
-		head(page, 'Thread & Bluetooth');
+		const { h, btn, busy, icon, toggle, toast, confirm, sleep, field, input, sheet, every, select } = App;
+		head(page, 'Thread, Bluetooth & Zigbee');
 		if (needPlugin(page)) return;
 		const body = h('div', h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }));
 		page.append(body);
 		let last = '';
+		const row2 = (label, sub, right) => h('div', { class: 'row', style: { padding: 0, minHeight: '48px' } }, h('span', { class: 'main' }, h('div', { class: 'label' }, label), h('div', { class: 'sub' }, sub)), right);
+		const copyBtn = (text, label) => btn(label || 'Copy', async () => { try { await navigator.clipboard.writeText(text); toast('Copied'); } catch (e) { toast(text); } }, 'small secondary');
+
+		// a job (detect, pair): start it, then follow its progress
+		async function runJob(b, start, status, max) {
+			const r = await iotc(start); if (r && r.error) throw new Error(r.error === 'busy' ? 'Already running' : r.error);
+			for (let i = 0; i < max; i++) {
+				await sleep(2000);
+				const j = await iotc(status);
+				if (j && j.message && j.state === 'running') b.title = j.message;
+				if (j && j.state === 'done') return j.message;
+				if (j && j.state === 'failed') throw new Error(j.message);
+			}
+			throw new Error('This took too long');
+		}
+		const detectBtn = (label, cls) => { const b = btn(label, () => busy(b, async () => {
+			toast('Testing the radio… (up to 2 minutes)');
+			const m = await runJob(b, 'detect', 'detect-status', 75);
+			toast(m); draw(true);
+		}), cls); return b; };
+		const chooseFw = st => sheet('Radio firmware', close => {
+			const s = select([['auto', 'Detected automatically'], ['stock', FW.stock[0] + ' (' + FW.stock[1] + ')'],
+				['multipan', FW.multipan[0] + ' (' + FW.multipan[1] + ')'], ['rcp', FW.rcp[0] + ' (' + FW.rcp[1] + ')']], st.firmware_setting || 'auto');
+			const ok = btn('Save', () => busy(ok, async () => {
+				const r = await iotc('set', { firmware: s.value }); if (r && r.error) throw new Error(r.error);
+				toast('Saved'); close(); setTimeout(() => draw(true), 3000);
+			}));
+			return h('div', h('div', { class: 'group' }, field('Firmware on the radio', s)),
+				App.hint('Normally Detect finds it. Choose by hand only if you know what you flashed and Detect could not tell. The speed is the one Detect found, or 921600 (stock) / 460800 (others).'),
+				h('div', { class: 'actions' }, btn('Cancel', close, 'secondary'), ok));
+		});
+
 		async function draw(force) {
 			const st = await iotc('info');
 			if (!st) return body.replaceChildren(App.note('Router Home did not answer.', 'bad'));
 			const key = JSON.stringify(st);
 			if (!force && key === last) return;
 			last = key;
+			const f = st.features || {};
 			const parts = [];
-			const intro = h('p', { class: 'hint', style: { margin: '0 4px 12px' } },
-				'This router has a Silicon Labs radio for Thread (smart-home devices, Matter) and Bluetooth LE. ',
-				App.explain('Thread & Bluetooth',
+			parts.push(h('p', { class: 'hint', style: { margin: '0 4px 12px' } },
+				'This router has a Silicon Labs radio for Thread (Matter devices), Bluetooth LE and, with multiprotocol firmware, Zigbee. ',
+				App.explain('Thread, Bluetooth & Zigbee',
 					'Thread is the low-power mesh network many Matter devices use: door sensors, bulbs, plugs, locks. A Thread border router connects that mesh to your home network.',
-					'With Home Assistant, this router can be its Thread radio, so you don\'t need a separate Thread dongle. Google Home and SmartThings still want their own hub as the controller.',
-					'Bluetooth LE here can scan for nearby devices (phones, tags, sensors) and make the router visible. It is the base for presence detection and Bluetooth sensors.',
-					{ rec: 'Turn on Thread if you use Home Assistant with Matter or Thread devices. Otherwise you can leave it off.' }));
-			parts.push(intro);
+					'Zigbee is an older smart-home mesh (IKEA, Aqara, Hue bulbs…). With multiprotocol firmware, the router runs the Zigbee stack and Zigbee2MQTT or Home Assistant connect to it over the network, instead of a USB dongle.',
+					'Bluetooth LE here can scan for nearby devices (phones, tags, sensors) and make the router visible.',
+					'What works depends on the firmware on the radio: the stock firmware does Thread and Bluetooth, a multiprotocol build does all three, and an OpenThread RCP build does Thread only.',
+					{ rec: 'Turn on Thread if you use Home Assistant with Matter or Thread devices. Otherwise you can leave the radio off.' })));
 			if (!st.tty) {
 				parts.push(App.note('The radio\'s serial port is not enabled in this firmware. Build the firmware with the radio change (ipq9570-askey-iot-radio.dtsi or patch 0005), then come back.', 'warn'));
 				return body.replaceChildren(...parts);
 			}
-			if (!st.installed) {
-				const file = h('input', { type: 'file', accept: '.tar.gz,.tgz' });
-				const go = btn('Install', () => busy(go, async () => {
-					const f = file.files[0]; if (!f) throw new Error('Choose your iotkit.tar.gz');
-					await upload(f, '/tmp/home-ui-iot.tar.gz');
-					const r = await iotc('install');
-					if (r && r.error) throw new Error(r.error);
-					toast('Installed'); draw(true);
-				}));
-				parts.push(App.sectionTitle('Step 1: radio software', null, 'package'), h('div', { class: 'card' },
-					h('p', { style: { margin: '0 0 10px' } }, 'The radio needs Silicon Labs\' programs: cpcd, otbr-agent with CPC, and cpc_hci_bridge. Router Home doesn\'t include them. The best way is to build them into the firmware from source (packages cpcd, otbr-cpc and cpc-hci-bridge); this page then finds them by itself. Or install your own iotkit.tar.gz here.'),
-					h('div', { class: 'group', style: { boxShadow: 'none', border: '1px solid var(--line)' } }, field('iotkit.tar.gz', file)),
-					h('div', { class: 'btn-row' }, go),
-					h('p', { class: 'hint', style: { margin: '10px 0 0' } }, 'It is kept through firmware updates. Use only a kit made for your own router.')));
+
+			/* Step 1: which firmware is on the radio */
+			if (!st.firmware) {
+				const d = st.detect;
+				parts.push(App.sectionTitle('Step 1: find the radio\'s firmware', null, 'antenna'), h('div', { class: 'card' },
+					h('p', { style: { margin: '0 0 10px' } }, 'Router Home tests the radio to see which firmware it runs: the stock firmware, a multiprotocol build, or OpenThread RCP. It takes up to 2 minutes, and the radio is off meanwhile.'),
+					d && d.state === 'failed' ? App.note(d.message, 'warn') : null,
+					h('div', { class: 'btn-row' }, detectBtn('Detect'), btn('Choose by hand', () => chooseFw(st), 'secondary')),
+					h('p', { class: 'hint', style: { margin: '10px 0 0' } }, 'Testing needs cpcd (for Silicon Labs firmware) or openthread-br (for OpenThread RCP) installed.')));
 				return body.replaceChildren(...parts);
 			}
+			const fwName = FW[st.firmware] || [st.firmware, ''];
+
+			/* Step 2: the programs for that firmware */
+			if (st.missing && st.missing.length) {
+				const card = h('div', { class: 'card' },
+					h('p', { style: { margin: '0 0 6px' } }, `The radio runs the ${fwName[0].toLowerCase()} (${fwName[1]}). Router Home needs these programs for it:`),
+					h('ul', { style: { margin: '0 0 10px', paddingLeft: '20px' } }, st.missing.map(m => h('li', m))),
+					st.firmware === 'rcp' ? h('p', { class: 'hint', style: { margin: '0 0 10px' } }, 'Install it from System → Software (openthread-br), then come back.') :
+						st.firmware === 'multipan' ? h('p', { class: 'hint', style: { margin: '0 0 10px' } }, 'Build them into the firmware from source (cpcd 4.9.1, otbr-agent with the CPC bus from Simplicity SDK 2025.6, cpc-hci-bridge, zigbeed), or install the packages, then come back.') :
+						h('p', { class: 'hint', style: { margin: '0 0 10px' } }, 'Build them into the firmware from source (packages cpcd, otbr-cpc and cpc-hci-bridge), or install your own iotkit.tar.gz below.'));
+				if (st.firmware === 'stock') {
+					const file = h('input', { type: 'file', accept: '.tar.gz,.tgz' });
+					const go = btn('Install', () => busy(go, async () => {
+						const fl = file.files[0]; if (!fl) throw new Error('Choose your iotkit.tar.gz');
+						await upload(fl, '/tmp/home-ui-iot.tar.gz');
+						const r = await iotc('install');
+						if (r && r.error) throw new Error(r.error);
+						toast('Installed'); draw(true);
+					}));
+					card.append(h('div', { class: 'group', style: { boxShadow: 'none', border: '1px solid var(--line)' } }, field('iotkit.tar.gz', file)),
+						h('div', { class: 'btn-row' }, go),
+						h('p', { class: 'hint', style: { margin: '10px 0 0' } }, 'It is kept through firmware updates. Use only a kit made from your own router.'));
+				}
+				card.append(h('div', { class: 'btn-row' }, detectBtn('Detect again', 'small secondary'), btn('Choose by hand', () => chooseFw(st), 'small secondary')));
+				parts.push(App.sectionTitle('Step 2: radio software', null, 'package'), card);
+				return body.replaceChildren(...parts);
+			}
+
+			/* Step 3: pairing (stock firmware only) */
 			if (!st.paired) {
 				const go = btn('Pair with the radio', () => busy(go, async () => {
-					const r = await iotc('pair'); if (r && r.error) throw new Error(r.error === 'busy' ? 'Already pairing' : r.error);
-					for (let i = 0; i < 60; i++) {
-						await sleep(2000);
-						const j = await iotc('pair-status');
-						if (j && j.message) go.lastChild && (go.title = j.message);
-						if (j && j.state === 'done') { toast(j.message); return draw(true); }
-						if (j && j.state === 'failed') throw new Error(j.message);
-					}
-					throw new Error('Pairing took too long');
+					const m = await runJob(go, 'pair', 'pair-status', 60);
+					toast(m); draw(true);
 				}));
-				parts.push(App.sectionTitle('Step 2: pair', null, 'lock'), h('div', { class: 'card' },
-					h('p', { style: { margin: '0 0 10px' } }, 'The radio still expects the stock firmware\'s encryption key. Pairing removes the old pairing and makes a new key for this router. It takes about 20 seconds.'),
+				parts.push(App.sectionTitle('Step 3: pair', null, 'lock'), h('div', { class: 'card' },
+					h('p', { style: { margin: '0 0 10px' } }, 'The stock firmware still expects the old encryption key. Pairing removes the old pairing and makes a new key for this router. It takes about 20 seconds.'),
 					h('div', { class: 'btn-row' }, go)));
 				return body.replaceChildren(...parts);
 			}
+
+			/* Thread set up by hand in the network settings */
+			if (st.netifd_thread) {
+				const go = btn('Move it to Router Home', () => busy(go, async () => {
+					if (!await confirm('Move Thread to Router Home?', `This removes the network interface "${st.netifd_thread}" and runs Thread from here instead. The Thread network (its dataset) is kept, and it survives restarts.`, 'Move')) return;
+					const r = await iotc('takeover'); if (r && r.error) throw new Error(r.error);
+					toast('Moved'); setTimeout(() => draw(true), 5000);
+				}));
+				parts.push(h('div', { class: 'card' },
+					App.note(`Thread already runs from the network settings (interface "${st.netifd_thread}"). Only one program can use the radio, so Router Home leaves it alone.`, 'warn'),
+					h('div', { class: 'btn-row' }, go)));
+				return body.replaceChildren(...parts);
+			}
+
+			/* the radio */
 			const on = toggle(st.enabled, async e => {
 				const r = await iotc('set', { enabled: e.target.checked }); if (r && r.error) toast(r.error, { bad: true });
 				toast(e.target.checked ? 'Starting… (about 15 s)' : 'Stopped'); setTimeout(() => draw(true), e.target.checked ? 12000 : 1500);
 			}, 'Radio on');
-			const bleOn = toggle(st.ble_enabled, async e => { await iotc('set', { ble: e.target.checked }); toast('Saved'); setTimeout(() => draw(true), 8000); }, 'Bluetooth on');
-			parts.push(h('div', { class: 'card' },
-				h('div', { class: 'row', style: { padding: 0, minHeight: '48px' } }, h('span', { class: 'main' }, h('div', { class: 'label' }, 'Radio on'), h('div', { class: 'sub' }, st.cpcd ? 'Running' : 'Stopped')), on),
-				h('div', { class: 'row', style: { padding: 0, minHeight: '48px' } }, h('span', { class: 'main' }, h('div', { class: 'label' }, 'Bluetooth LE'), h('div', { class: 'sub' }, st.bluetooth_kmod ? 'Uses the same radio' : 'Needs kmod-hci-uart in the firmware')), bleOn),
-				h('p', { class: 'hint', style: { margin: '8px 0 0' } }, st.source === 'kit' ? 'Using the programs from your iotkit.' : 'Using the programs built into the firmware.'),
-				st.source === 'kit' && st.packages ? h('div', { class: 'btn-row' }, btn('Use the built-in programs instead', async () => {
-					if (!await confirm('Remove the iotkit?', 'The firmware has its own cpcd and otbr-agent now. The pairing key and Thread network stay.', 'Remove kit')) return;
-					await iotc('remove'); await iotc('set', { enabled: true }); toast('Switched to the built-in programs'); setTimeout(() => draw(true), 12000);
-				}, 'small secondary')) : null));
+			const running = st.firmware === 'rcp' ? st.otbr : st.cpcd;
+			const card = h('div', { class: 'card' },
+				row2('Radio on', running ? 'Running' : 'Stopped', on),
+				row2(fwName[0], fwName[1] + (st.baud ? ` · ${st.baud} baud` : ''), btn('Change', () => sheet('Radio firmware', close => h('div',
+					App.hint('Flashed other firmware onto the radio? Detect it again so Router Home talks to it the right way.'),
+					h('div', { class: 'actions' }, btn('Choose by hand', () => { close(); chooseFw(st); }, 'secondary'), detectBtn('Detect again')))), 'small secondary')));
+			if (f.ble) {
+				const bleOn = toggle(st.ble_enabled, async e => { await iotc('set', { ble: e.target.checked }); toast('Saved'); setTimeout(() => draw(true), 8000); }, 'Bluetooth on');
+				card.append(row2('Bluetooth LE', !st.bluetooth_kmod ? 'Needs kmod-hci-uart in the firmware' : !st.bluetooth_tools ? 'Needs cpc-hci-bridge and bluez-utils' : 'Uses the same radio', bleOn));
+			}
+			if (f.zigbee) {
+				const zbOn = toggle(st.zigbee_enabled, async e => { await iotc('set', { zigbee: e.target.checked }); toast('Saved'); setTimeout(() => draw(true), 10000); }, 'Zigbee on');
+				card.append(row2('Zigbee', st.zigbeed ? 'For Zigbee2MQTT or Home Assistant' : 'Needs zigbeed', zbOn));
+			}
+			if (st.firmware === 'rcp') card.append(h('p', { class: 'hint', style: { margin: '8px 0 0' } }, 'Bluetooth LE and Zigbee need the multiprotocol firmware on the radio.'));
+			if (st.firmware === 'stock') card.append(h('p', { class: 'hint', style: { margin: '8px 0 0' } }, st.source === 'kit' ? 'Using the programs from your iotkit.' : 'Using the programs built into the firmware.'));
+			if (st.firmware === 'stock' && st.source === 'kit' && st.packages) card.append(h('div', { class: 'btn-row' }, btn('Use the built-in programs instead', async () => {
+				if (!await confirm('Remove the iotkit?', 'The firmware has its own cpcd and otbr-agent now. The pairing key and Thread network stay.', 'Remove kit')) return;
+				await iotc('remove'); await iotc('set', { enabled: true }); toast('Switched to the built-in programs'); setTimeout(() => draw(true), 12000);
+			}, 'small secondary')));
+			parts.push(card);
 			if (!st.enabled) return body.replaceChildren(...parts);
 
 			/* Thread */
@@ -724,7 +806,8 @@ const More = (() => {
 			const tcard = h('div', { class: 'card' },
 				h('div', { class: 'card-head' }, icon('antenna'), h('span', { class: 'grow' }, t.name && t.state !== 'disabled' ? t.name : 'No network yet'), h('span', { class: 'pill ' + role[1] }, role[0])),
 				t.state && t.state !== 'disabled' ? kv([['Channel', t.channel], ['PAN ID', t.panid], ['Extended PAN ID', h('span', { class: 'mono' }, t.extpanid)], ['Other Thread routers/devices', String(t.neighbors)],
-					['Router address on Thread', h('span', { class: 'mono' }, t.address || '—')], ['Radio firmware', t.rcp]]) : h('p', { class: 'hint', style: { margin: 0 } }, st.otbr ? 'Start a new Thread network, or join an existing one (for example Home Assistant\'s, or your other router\'s).' : 'otbr-agent is not running yet.'));
+					['Router address on Thread', h('span', { class: 'mono' }, t.address || '—')], ['Radio firmware', t.rcp]]) :
+					h('p', { class: 'hint', style: { margin: 0 } }, st.otbr ? 'Start a new Thread network, or join an existing one (for example Home Assistant\'s, or your other router\'s).' : 'otbr-agent is not running yet.'));
 			const actions = h('div', { class: 'btn-row' });
 			if (st.otbr) {
 				actions.append(
@@ -766,11 +849,13 @@ const More = (() => {
 						if (!await confirm('Leave the Thread network?', 'This router forgets the network and its key.', 'Leave', true)) return;
 						await iotc('thread-leave'); toast('Left the network'); draw(true);
 					}, 'small secondary') : null);
+			} else if (st.firmware === 'multipan') {
+				tcard.append(h('p', { class: 'hint', style: { margin: '8px 0 0' } }, 'If Thread stays "Not running", the otbr-agent installed is too old for this firmware: it needs one built from Simplicity SDK 2025.6 or newer. Log: logread -e otbr'));
 			}
 			parts.push(App.sectionTitle('Thread', null, 'antenna'), tcard, actions);
 
 			/* Bluetooth */
-			if (st.ble_enabled) {
+			if (f.ble && st.ble_enabled) {
 				const b = st.ble || {};
 				const adv = toggle(b.advertising, async e => { await iotc('ble-adv', { on: e.target.checked }); toast(e.target.checked ? 'Visible as ' + (App.info.hostname || 'the router') : 'Hidden'); }, 'Visible to phones');
 				const list = h('div');
@@ -785,9 +870,27 @@ const More = (() => {
 							right: h('span', { class: 'bars', title: x.rssi + ' dBm' }, [1, 2, 3, 4].map(i => h('i', { class: i <= bars(x.rssi) ? 'on' : '' }))) }))) : null);
 				}), 'small');
 				parts.push(App.sectionTitle('Bluetooth LE', null, 'antenna'), h('div', { class: 'card' },
-					b.up ? kv([['Status', 'On'], ['Address', h('span', { class: 'mono' }, b.address || '—')]]) : h('p', { class: 'hint', style: { margin: 0 } }, st.bluetooth_kmod ? 'Starting…' : 'Bluetooth needs kmod-hci-uart (and input-support) built into the firmware.'),
+					b.up ? kv([['Status', 'On'], ['Address', h('span', { class: 'mono' }, b.address || '—')]]) :
+						h('p', { class: 'hint', style: { margin: 0 } }, !st.bluetooth_kmod ? 'Bluetooth needs kmod-hci-uart (and input-support) built into the firmware.' :
+							st.firmware === 'multipan' ? 'Starting… If it stays off, cpc-hci-bridge needs rebuilding against cpcd 4.9. Log: /tmp/home-ui/iot-ble-bridge.log' : 'Starting…'),
 					b.up ? h('div', { class: 'row', style: { padding: '10px 0 0', minHeight: 0 } }, h('span', { class: 'main' }, h('div', { class: 'label' }, 'Visible to phones'), h('div', { class: 'sub' }, 'Advertises the router\'s name (try nRF Connect)')), adv) : null,
 					b.up ? h('div', { class: 'btn-row' }, scan) : null, list));
+			}
+
+			/* Zigbee */
+			if (f.zigbee && st.zigbee_enabled) {
+				const z = st.zigbee || {};
+				const url = `tcp://${z.address || 'router'}:${z.port || 9999}`;
+				const zcard = h('div', { class: 'card' },
+					h('div', { class: 'card-head' }, icon('antenna'), h('span', { class: 'grow' }, 'Zigbee coordinator'),
+						h('span', { class: 'pill ' + (z.running ? '' : 'mute') }, !st.zigbeed ? 'Not installed' : z.running ? (z.clients ? 'Connected' : 'Waiting for an app') : 'Starting…')),
+					!st.zigbeed ? h('p', { class: 'hint', style: { margin: 0 } }, 'Install zigbeed (the Silicon Labs Zigbee stack, built for this router) to use Zigbee.') : h('div',
+						kv([['Address', h('span', { class: 'mono' }, url)], ['Apps connected', String(z.clients || 0)]]),
+						h('p', { class: 'hint', style: { margin: '10px 0 4px' } }, 'Zigbee2MQTT: serial port ', h('span', { class: 'mono' }, url), ', adapter ', h('span', { class: 'mono' }, 'ember'), '.'),
+						h('p', { class: 'hint', style: { margin: '0 0 4px' } }, 'Home Assistant (ZHA): EZSP, path ', h('span', { class: 'mono' }, `socket://${z.address || 'router'}:${z.port || 9999}`), '.'),
+						h('p', { class: 'hint', style: { margin: 0 } }, 'Only one app at a time. It is reachable from your home network only.'),
+						h('div', { class: 'btn-row' }, copyBtn(url, 'Copy address'))));
+				parts.push(App.sectionTitle('Zigbee', null, 'antenna'), zcard);
 			}
 			body.replaceChildren(...parts);
 		}

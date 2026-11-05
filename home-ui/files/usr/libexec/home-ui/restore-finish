@@ -226,10 +226,15 @@ done < "$R/services_off.txt"
 rm -rf "$R/files" "$R/finish.sh"
 rm -f /lib/upgrade/keep.d/home-ui-restore
 /etc/init.d/home-ui-restore disable 2>/dev/null; rm -f /etc/init.d/home-ui-restore
-if [ -n "$failed" ]; then state done "Restored. Could not reinstall:$failed"
-else state done 'Everything was restored'; fi
+note=""
+[ $changed = 1 ] && note=" The router restarts in a few seconds so everything starts cleanly."
+if [ -n "$failed" ]; then state done "Restored. Could not reinstall:$failed.$note"
+else state done "Everything was restored.$note"; fi
 date > "$R/done"
 log "restore finished${failed:+ (not reinstalled:$failed)}"
 rm -f /tmp/home-ui-restore.pid
-[ $changed = 1 ] && { sync; sleep 2; reboot; }
+[ $changed = 1 ] && {
+	log "restarting the router now so the restored apps and services start cleanly"
+	sync; sleep 8; reboot
+}
 exit 0
