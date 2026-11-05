@@ -138,6 +138,7 @@ These come with Router Home (in `addons/` of the source):
 | Add-on | Shows how to |
 |---|---|
 | `askey-cbe1v1k-light` | drive an LED behind an I2C chip: `files/` with a program and a service, a handler for `led`, install/remove scripts |
+| `askey-sbe1v1k-light` | mix any colour on an RGB LED made of three PWM LEDs (`pwm-leds`), with brightness and colour balance: `files/` with a program and a service, a handler for `led`, install/remove scripts that hand the light back to the firmware's own service when removed |
 | `spectrum-sax1v1k-fan` | describe a fan on a GPIO pin with no code at all (`fan_gpio`) |
 | `qmi-modem` | report modem status from `uqmi`, for any router (`"boards": ["*"]` plus `detect`) |
 

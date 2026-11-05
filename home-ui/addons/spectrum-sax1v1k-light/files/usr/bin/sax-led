@@ -1,0 +1,100 @@
+#!/bin/sh
+# sax-led: set the Spectrum SAX1V1K front LED (red, green and blue, on/off)
+# Usage: sax-led <off|white|red|green|blue|yellow|cyan|magenta|breath>
+#
+# Red (GPIO 25) and blue (GPIO 26) are status LEDs in OpenWrt. Green
+# (GPIO 32) is not described yet, so while it is lit one detached
+# gpioset (gpiod-tools) holds the pin; green off simply releases it.
+
+GPIO="$(uci -q get sax-led.main.green_gpio || echo 32)"
+case "$GPIO" in ''|*[!0-9]*) GPIO=32 ;; esac
+
+led() {	# path of the LED of colour $1
+	local d
+	for d in /sys/class/leds/$1:status /sys/class/leds/*$1*status*; do
+		[ -d "$d" ] && { echo "$d"; return 0; }
+	done
+	return 1
+}
+R="$(led red)"; G="$(led green)"; B="$(led blue)"
+[ -n "$R$B" ] || { echo "no red/blue status LED found" >&2; exit 1; }
+
+put() {	# put <led path> <0|1> [timer]
+	[ -n "$1" ] || return 0
+	echo none > "$1/trigger" 2>/dev/null
+	echo "$2" > "$1/brightness" 2>/dev/null
+	if [ "$3" = timer ] && [ "$2" = 1 ]; then
+		echo timer > "$1/trigger" 2>/dev/null && {
+			echo 1200 > "$1/delay_on" 2>/dev/null
+			echo 800 > "$1/delay_off" 2>/dev/null
+		}
+	fi
+}
+
+green_holders() {	# PIDs of gpioset processes holding our pin
+	local p c
+	for p in /proc/[0-9]*; do
+		[ -r "$p/cmdline" ] || continue
+		c="$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)"
+		case "$c" in
+			*gpioset*" $GPIO="*) echo "${p#/proc/}" ;;
+		esac
+	done
+}
+
+green_mode() {	# what the pin is held at now: on, blink, or nothing
+	local p c
+	for p in /proc/[0-9]*; do
+		[ -r "$p/cmdline" ] || continue
+		c="$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)"
+		case "$c" in
+			*gpioset*" $GPIO=1"*)
+				case "$c" in *" -t "*) echo blink ;; *) echo on ;; esac
+				return ;;
+		esac
+	done
+}
+
+green_set() {	# green_set <0|1> [timer]
+	local pid cur want=off
+	[ "$1" = 1 ] && { want=on; [ "$2" = timer ] && want=blink; }
+	cur="$(green_holders)"
+	# the running process says what the pin is doing, so this can never
+	# get out of step with reality
+	[ -n "$cur" ] && [ "$want" = "$(green_mode)" ] && return 0
+	for pid in $cur; do kill "$pid" 2>/dev/null; done
+	[ -n "$cur" ] && sleep 1	# let the pin be released
+	[ "$want" = off ] && return 0
+	command -v gpioset >/dev/null || return 0
+	local pre=""
+	command -v setsid >/dev/null && pre=setsid
+	if [ "$want" = blink ]; then
+		$pre gpioset -c gpiochip0 -t 1200ms,800ms "$GPIO"=1 >/dev/null 2>&1 </dev/null &
+	else
+		$pre gpioset -c gpiochip0 "$GPIO"=1 >/dev/null 2>&1 </dev/null &
+	fi
+	return 0
+}
+
+rgb() {	# rgb <red> <green> <blue> [timer]
+	put "$R" "$1" "$4"
+	if [ -n "$G" ]; then put "$G" "$2" "$4"; else green_set "$2" "$4"; fi
+	put "$B" "$3" "$4"
+}
+
+case "$1" in
+	off)     rgb 0 0 0 ;;
+	white)   rgb 1 1 1 ;;
+	red)     rgb 1 0 0 ;;
+	green)   rgb 0 1 0 ;;
+	blue)    rgb 0 0 1 ;;
+	yellow)  rgb 1 1 0 ;;
+	cyan)    rgb 0 1 1 ;;
+	magenta) rgb 1 0 1 ;;
+	# "starting": only the blue LED blinks. Blinking all three looks like
+	# random colours, because each LED has its own kernel timer and they
+	# drift apart.
+	breath)  rgb 0 0 1 timer ;;
+	*) echo "usage: $0 <off|white|red|green|blue|yellow|cyan|magenta|breath>"; exit 1 ;;
+esac
+exit 0

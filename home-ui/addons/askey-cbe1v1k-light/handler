@@ -12,6 +12,8 @@ case "$1 $2" in
  "description":"Blue: WAN · white: 5G · yellow: no internet · red: offline",
  "colors":[{"id":"blue","label":"WAN","css":"#3b7cff"},{"id":"white","label":"5G","css":"#f2f5f8"},
   {"id":"yellow","label":"No internet","css":"#f0b429"},{"id":"red","label":"Offline","css":"#ff4d55"},
+  {"id":"green","label":"Green","css":"#2fbf71"},{"id":"cyan","label":"Cyan","css":"#2ad4e0"},
+  {"id":"magenta","label":"Magenta","css":"#d24dff"},
   {"id":"breath","label":"Starting","css":"linear-gradient(#fff,#8899aa)"}]}
 J
 	;;
@@ -31,7 +33,7 @@ J
 	case "$color" in white|red|green|blue|yellow|cyan|magenta|breath|off) ;; *) color=white ;; esac
 	/etc/init.d/cbe-led stop >/dev/null 2>&1
 	/usr/bin/cbe-led "$color" "$(uci -q get cbe-led.main.brightness || echo 96)" >/dev/null 2>&1
-	( sleep 4; /etc/init.d/cbe-led start >/dev/null 2>&1 ) </dev/null >/dev/null 2>&1 &
+	( sleep 4; [ "$(uci -q get cbe-led.main.enabled)" = 0 ] || /etc/init.d/cbe-led start >/dev/null 2>&1 ) </dev/null >/dev/null 2>&1 &
 	echo '{"ok":true}'
 	;;
 *)
