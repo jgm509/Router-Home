@@ -34,6 +34,18 @@ Since 3.0 the layout follows the card style of the YALA app: a bottom bar with *
 - **System**: name, time zone, admin password, front light, firmware update, backup/restore, log, restart, factory reset.
 - **Full backup** (System → Back up → Back up everything): the normal OpenWrt settings backup plus the apps you installed, Router Home itself, sign-ins (Proton, Tailscale) and files you added by hand. Apps still in the OpenWrt feeds are listed and reinstalled (latest version) after a restore; apps that aren't in the feeds are saved in the file and put back only if they are newer than what the new firmware has. Restoring works from Router Home or from LuCI: a one-shot boot hook (`/etc/uci-defaults/95-home-ui-restore`) finishes the job once the router is online, then restarts once. If it is still waiting (no internet yet, or a package source failed), it keeps trying at every start, and the banner in Router Home has a **Continue** button to run it right away. A firmware update from Router Home with "Keep apps" does the same automatically. Log: `/etc/home-ui/restore/log`.
 
+## Install
+
+On the router, over SSH (`ssh root@192.168.1.1`):
+
+```
+wget -O- https://github.com/jgm509/router-home/releases/latest/download/install.sh | sh
+```
+
+It installs what Router Home needs (with apk or opkg), downloads the latest release and installs it. Run it again to update; your settings are kept. Then open `http://192.168.1.1/home` and sign in with the router's root password.
+
+Without internet on the router: download `home-ui.tar.gz` and `install.sh` from the [latest release](https://github.com/jgm509/router-home/releases/latest), copy both to the router's `/tmp` (`scp -O`), then run `sh /tmp/install.sh /tmp/home-ui.tar.gz`.
+
 ## Add it to your build
 
 1. Copy the `home-ui` folder into your OpenWrt tree as `package/home-ui`.
@@ -58,22 +70,7 @@ System → More → **Install as an app**. Browsers only make a full app (own wi
 
 ## Updating
 
-From version 1.3.0 on: System → Software → **Update Router Home**, pick the new `home-ui.tar.gz` (`.tgz` and `.tar` work too). Settings are kept; you sign in again afterwards.
-
-## Try it without rebuilding
-
-Copy `home-ui.tar.gz` to the router's `/tmp`, then:
-
-```
-umask 022
-cd /tmp && tar xzf home-ui.tar.gz
-cp -n home-ui/files/etc/config/* /etc/config/ ; rm -rf home-ui/files/etc/config
-cp -r home-ui/files/* /
-chmod -R a+rX /www/home /usr/share/home-ui
-chmod +x /usr/libexec/rpcd/home-ui /usr/libexec/home-ui/* /usr/sbin/home-ui-* /etc/init.d/home-ui-*
-/usr/libexec/home-ui/addon autoinstall
-/etc/init.d/rpcd restart
-```
+Router Home checks GitHub once a day for a newer release and says so on the dashboard; System → Software → **Update Router Home** then installs it in one tap. The check only asks GitHub for the latest version number and can be turned off in that same screen. You can also run the installer again, or pick a `home-ui.tar.gz` file there (`.tgz` and `.tar` work too). Settings are kept; you sign in again afterwards.
 
 ## Files
 
