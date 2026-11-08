@@ -22,7 +22,8 @@
 					"security_info",
 					"upnp_status",
 					"pkg_status",
-					"guard_info"
+					"guard_info",
+					"update_check"
 				],
 				"luci-rpc": [
 					"getHostHints",
@@ -137,7 +138,9 @@
 					"agh",
 					"modem_extra",
 					"sysx",
-					"iot"
+					"iot",
+					"update_install",
+					"update_set"
 				],
 				"luci": [
 					"setPassword",
@@ -191,7 +194,9 @@
 				"/tmp/home-ui-addon.tar.gz": [
 					"write"
 				],
-				"/tmp/home-ui-iot.tar.gz": [ "write" ],
+				"/tmp/home-ui-iot.tar.gz": [
+					"write"
+				],
 				"/tmp/home-ui-gps.tar.gz": [
 					"write"
 				]

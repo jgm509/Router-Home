@@ -100,9 +100,13 @@ main {
 		background: var(--surface);
 	}
 	.tabs .brand {
-		display: flex; align-items: center; gap: 10px;
-		padding: 4px 10px 22px; font-weight: 700; font-size: 17px; color: var(--ink);
+		display: flex; align-items: center; gap: 10px; width: 100%; margin-bottom: 14px;
+		padding: 8px 10px; font: inherit; font-weight: 700; font-size: 17px; color: var(--ink);
+		background: none; border: 0; border-radius: var(--radius-sm); cursor: pointer; text-align: left;
 	}
+	.tabs .brand:hover { background: var(--surface-2); }
+	.tabs .brand > span:not(.lamp) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.tabs .brand .chev-d { width: 16px; height: 16px; color: var(--muted); transform: rotate(90deg); }
 	.tabs a {
 		flex: none; flex-direction: row; justify-content: flex-start; gap: 12px;
 		padding: 10px 12px; border-radius: var(--radius-sm); font-size: 15px;
@@ -390,7 +394,8 @@ body { font-size: 15.5px; }
 .appbar button:active { background: var(--surface-2); }
 .appbar .dot { width: 11px; height: 11px; }
 .appbar .chev-d { width: 18px; height: 18px; color: var(--muted); transform: rotate(90deg); }
-@media (min-width: 900px) { .appbar { margin: -40px -32px 18px; border-radius: 0 0 18px 18px; } }
+/* wide screens: the sidebar already names the router and opens this menu */
+@media (min-width: 900px) { .appbar { display: none; } }
 
 /* bottom bar with a raised Dashboard button */
 .tabs { background: color-mix(in srgb, var(--surface) 94%, transparent); }
@@ -447,6 +452,7 @@ body { font-size: 15.5px; }
 .chart svg { display: block; width: 100%; height: 170px; overflow: visible; }
 .chart .grid line { stroke: var(--line); stroke-width: 1; }
 .chart .grid text { fill: var(--muted); font-size: 11px; font-family: var(--font); }
+.chart .chart-wait { fill: var(--muted); font-size: 12px; font-family: var(--font); }
 .chart path.l1 { stroke: var(--accent); fill: none; stroke-width: 2.2; }
 .chart path.l2 { stroke: var(--info); fill: none; stroke-width: 2.2; }
 .chart path.a1 { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: none; }
@@ -528,3 +534,17 @@ a.card.tiles { display: grid; }
 .pill.acc, .citem .side .pill { text-transform: none; letter-spacing: 0; font-size: 12.5px; }
 .legend-pills span.c2 { --c: var(--info); }
 .tile .v { white-space: nowrap; } .tile .ic { width: 40px; height: 40px; } .tile .k { white-space: nowrap; }
+
+/* clients card: let long labels shorten instead of running under the arrow,
+   and tighten it on narrow phones so "4 connected" fits */
+.tile > div { min-width: 0; }
+.tile .k { overflow: hidden; text-overflow: ellipsis; }
+.tiles > .chev { flex: none; margin-left: 2px; }
+@media (max-width: 420px) {
+	.tiles { gap: 6px; }
+	.tile { gap: 9px; }
+	.tile + .tile { padding-left: 9px; }
+	.tile .ic { width: 34px; height: 34px; }
+	.tile .ic svg { width: 19px; height: 19px; }
+	.tile .v { font-size: 15px; white-space: normal; line-height: 1.2; }
+}

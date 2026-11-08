@@ -1,0 +1,71 @@
+#!/bin/sh
+# Router Home: is a newer release on GitHub?
+#
+#   update-check [force]   JSON: current, latest, newer, notes, url, enabled
+#                          (asks GitHub at most once a day unless "force")
+#   update-check install   download the latest release and install it
+#
+# The repository is home-ui.main.update_repo (default jgm509/router-home);
+# home-ui.main.update_check=0 turns the check off.
+. /usr/share/libubox/jshn.sh
+
+RUN=/tmp/home-ui
+CACHE=$RUN/update-check.json
+MAXAGE=86400
+CUR=$(cat /usr/share/home-ui/version 2>/dev/null)
+REPO=$(uci -q get home-ui.main.update_repo); REPO=${REPO:-jgm509/router-home}
+ENABLED=$(uci -q get home-ui.main.update_check); [ "$ENABLED" = 0 ] || ENABLED=1
+mkdir -p "$RUN"
+
+# 1 when version $1 is newer than $2 (numbers compared part by part, a leading v ignored)
+newer() {
+	echo "${1#v} ${2#v}" | awk '{
+		n = split($1, a, "."); m = split($2, b, "."); k = n > m ? n : m
+		for (i = 1; i <= k; i++) { x = a[i] + 0; y = b[i] + 0; if (x > y) { print 1; exit } if (x < y) { print 0; exit } }
+		print 0 }'
+}
+fetch() { wget -q -T 15 -U "RouterHome/$CUR" -O "$2" "$1" 2>/dev/null; }
+fail() { json_init; json_add_string current "$CUR"; json_add_boolean enabled "$ENABLED"; json_add_string error "$1"; json_dump; exit 0; }
+
+case "$1" in
+install)
+	[ -s "$CACHE" ] || "$0" force >/dev/null
+	URL=$(jsonfilter -i "$CACHE" -e '@.asset' 2>/dev/null)
+	[ -n "$URL" ] || fail "The release has no home-ui.tar.gz to download"
+	rm -f /tmp/home-ui-update.tar.gz
+	fetch "$URL" /tmp/home-ui-update.tar.gz || fail "The download failed. Is the router online?"
+	[ "$(wc -c < /tmp/home-ui-update.tar.gz)" -le $((8 * 1024 * 1024)) ] || { rm -f /tmp/home-ui-update.tar.gz; fail "The download is too big for a Router Home update"; }
+	rm -f "$CACHE"
+	exec /usr/libexec/home-ui/self-update /tmp/home-ui-update.tar.gz
+	;;
+esac
+
+if [ "$ENABLED" = 0 ] && [ "$1" != force ]; then
+	json_init; json_add_string current "$CUR"; json_add_boolean enabled 0; json_dump; exit 0
+fi
+
+# a cached answer from today, unless asked to check now
+if [ "$1" != force ] && [ -s "$CACHE" ] && [ -n "$(find "$CACHE" -mmin -$((MAXAGE / 60)) 2>/dev/null)" ]; then
+	L=$(jsonfilter -i "$CACHE" -e '@.latest' 2>/dev/null)
+	# the installed version may have changed since: work "newer" out again
+	json_load "$(cat "$CACHE")"; json_add_string current "$CUR"; json_add_boolean newer "$(newer "$L" "$CUR")"
+	json_add_boolean enabled "$ENABLED"; json_dump; exit 0
+fi
+
+T=$RUN/update-release.json
+fetch "https://api.github.com/repos/$REPO/releases/latest" "$T" || { rm -f "$T"; fail "Could not reach GitHub. Is the router online?"; }
+TAG=$(jsonfilter -i "$T" -e '@.tag_name' 2>/dev/null)
+[ -n "$TAG" ] || { rm -f "$T"; fail "GitHub didn't answer with a release"; }
+json_init
+json_add_string latest "${TAG#v}"
+json_add_string name "$(jsonfilter -i "$T" -e '@.name' 2>/dev/null)"
+json_add_string notes "$(jsonfilter -i "$T" -e '@.body' 2>/dev/null | head -c 4000)"
+json_add_string published "$(jsonfilter -i "$T" -e '@.published_at' 2>/dev/null | cut -c1-10)"
+json_add_string url "$(jsonfilter -i "$T" -e '@.html_url' 2>/dev/null)"
+json_add_string asset "$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz"].browser_download_url' 2>/dev/null)"
+json_dump > "$CACHE.$$" && mv "$CACHE.$$" "$CACHE"
+rm -f "$T"
+json_add_string current "$CUR"
+json_add_boolean newer "$(newer "$TAG" "$CUR")"
+json_add_boolean enabled "$ENABLED"
+json_dump

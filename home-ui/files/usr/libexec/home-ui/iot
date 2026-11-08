@@ -304,6 +304,7 @@ detect)	# run as a job: writes $RUN/iotdetect.json
 		why="No answer from the radio."
 		[ -z "$C$O" ] && why="Nothing to test with: install cpcd (for Silicon Labs firmware) or openthread-br (for an OpenThread RCP)."
 		[ -n "$C" ] && [ -z "$O" ] && why="No CPC firmware answered. If the radio runs OpenThread RCP firmware, install openthread-br to detect it."
+		[ -z "$O" ] && [ -n "$(pick_otbr cpc)" ] && why="No CPC firmware answered. If the radio runs OpenThread RCP firmware, replace otbr-cpc with openthread-br (otbr-cpc only talks to Silicon Labs CPC firmware): apk del otbr-cpc && apk add openthread-br"
 		job failed "$why" json iotdetect
 	fi
 	rm -f "$RUN/iotdetect.progress"

@@ -119,6 +119,9 @@ list)
 		"fan_status": {},
 		"wifi_info": {},
 		"self_update": {},
+		"update_check": { "force": true },
+		"update_install": {},
+		"update_set": { "enabled": true },
 		"full_backup": { "action": "str" },
 		"restore_status": {},
 		"restore_dismiss": {},
@@ -607,6 +610,26 @@ $(brctl showmacs "${br##*/}" 2>/dev/null | awk -v ports="$ports" 'NR>1 && $3=="n
 		else
 			"$JOBS/self-update" /tmp/home-ui-update.tar.gz </dev/null 2>/dev/null
 		fi
+		;;
+
+	update_check)
+		json_get_var force force
+		if [ "$force" = 1 ] || [ "$force" = true ]; then "$JOBS/update-check" force; else "$JOBS/update-check"; fi
+		;;
+
+	update_install)
+		if command -v setsid >/dev/null 2>&1; then
+			setsid "$JOBS/update-check" install </dev/null 2>/dev/null
+		else
+			"$JOBS/update-check" install </dev/null 2>/dev/null
+		fi
+		;;
+
+	update_set)
+		json_get_var en enabled
+		case "$en" in 1|true) uci -q set home-ui.main.update_check=1 ;; *) uci -q set home-ui.main.update_check=0 ;; esac
+		uci -q commit home-ui
+		echo '{"ok":true}'
 		;;
 
 	wifi_info)

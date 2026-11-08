@@ -33,23 +33,14 @@ const More = (() => {
 					if (!await App.confirm('Restart the router?', 'The internet will be down for about a minute.', 'Restart')) return;
 					await call('system', 'reboot'); App.toast('Restarting…');
 				} })),
-			lbl('Monitoring'),
+			lbl('Monitoring & tools'),
 			group(
 				row({ icon: 'gauge', label: 'System monitoring', sub: 'Live CPU, memory, load and temperatures', href: '#/more/monitor' }),
 				row({ icon: 'storage', label: 'Storage', sub: 'Space used, mount points', href: '#/more/storage' }),
 				row({ icon: 'chart', label: 'Realtime charts', sub: 'Live traffic, CPU and memory graphs', href: '#/more/charts' }),
-				row({ icon: 'chart', label: 'Data usage', sub: 'How much each device used', href: '#/network/usage' })),
-			lbl('Network'),
-			group(
-				row({ icon: 'tools', label: 'Network tools', sub: 'Ping, traceroute, DNS lookup, routes and ARP', href: '#/more/tools' }),
-				row({ icon: 'refresh', label: 'Connection check', sub: 'Find and fix internet problems', href: '#/network/check' }),
-				row({ icon: 'dns', label: 'DHCP & DNS', sub: 'Name servers, encrypted DNS, local names', href: '#/network/dns' }),
-				row({ icon: 'shield', label: 'Firewall', sub: 'Zones, port forwards, rules, UPnP', href: '#/network/firewall' }),
-				row({ icon: 'interfaces', label: 'Networks', sub: 'Guest and IoT networks, VLANs', href: '#/network/lans' }),
-				row({ icon: 'lock', label: 'Security check', sub: 'Look for risky settings', href: '#/network/security' }),
-				info.adguard ? row({ icon: 'shield', label: 'AdGuard Home', sub: 'Blocking, lists, query log', href: '#/network/adguard' }) : null,
-				row({ icon: 'vpn', label: 'VPN', sub: 'WireGuard, Proton, Tailscale', href: '#/network/vpn' }),
-				info.modem || info.modemmanager ? row({ icon: 'antenna', label: 'Mobile & modem', sub: 'Signal, bands, SMS, eSIM, GPS', href: '#/network/mobile' }) : null),
+				row({ icon: 'tools', label: 'Network tools', sub: 'Ping, traceroute, DNS lookup, routes and ARP', href: '#/more/tools' })),
+			h('p', { class: 'hint', style: { margin: '6px 16px 0' } }, 'Internet settings (DNS, VPN, firewall, guest networks, data usage, mobile, security check) are under ',
+				h('a', { href: '#/network' }, 'Interfaces'), '.'),
 			lbl('Hardware'),
 			group(
 				fan && fan.available ? row({ icon: 'fan', label: 'Fan', sub, onClick: () => openFan(() => call('home-ui', 'fan_status').then(f => { sub.textContent = fanSummary(f); })) }) :

@@ -430,8 +430,8 @@ const App = (() => {
 		['wifi', 'Wireless', 'wifi'],
 		['more', 'More', 'more']
 	];
-	/* pages reached from "More" light up the More tab */
-	const tabFor = (name, sub) => TABS.some(t => t[0] === name) && !(name === 'network' && /^(firewall|lans|adguard|check|security)$/.test(sub || '')) ? name : 'more';
+	/* pages that aren't a tab of their own (System, More's pages) light up More */
+	const tabFor = name => TABS.some(t => t[0] === name) ? name : 'more';
 	let prevHash = '', lastHash = '';
 	let current = null, timers = [], aborts = [];
 
@@ -484,10 +484,24 @@ const App = (() => {
 	function buildTabs() {
 		const nav = $('#tabs');
 		smart(nav).replaceChildren(
-			h('div', { class: 'brand' }, h('span', { class: 'lamp online', style: { width: '22px', height: '22px', boxShadow: 'none' } }), info.hostname || 'Router'),
+			// on wide screens the dashboard's title bar is hidden: its menu opens from here
+			h('button', { type: 'button', class: 'brand', onclick: openQuick, 'aria-label': 'Router menu' },
+				h('span', { class: 'lamp online', style: { width: '22px', height: '22px', boxShadow: 'none' } }), h('span', info.hostname || 'Router'), icon('chev', 'chev-d')),
 			TABS.map(([id, label, ic]) => h('a', { href: '#/' + id, 'data-tab': id, class: id === 'home' ? 'center' : null },
 				h('span', { class: 'tab-ic' }, icon(ic), h('i', { class: 'tab-badge', hidden: true })), h('span', { class: 'tab-label' }, label)))
 		);
+	}
+	/* the router menu: from the dashboard's title bar, or the sidebar name on wide screens */
+	function openQuick() {
+		sheet(info.hostname || 'Router', close => h('div',
+			group(
+				row({ icon: 'system', label: 'System settings', sub: 'Name, password, updates, backup', onClick: () => { close(); go('system'); } }),
+				row({ icon: 'palette', label: 'Appearance', value: Theme.name(), onClick: () => { close(); go('more/appearance'); } }),
+				row({ icon: 'power', label: 'Restart router', onClick: async () => {
+					if (!await confirmBox('Restart the router?', 'The internet will be down for about a minute.', 'Restart')) return;
+					await call('system', 'reboot'); toast('Restarting…'); close();
+				} }),
+				row({ icon: 'user', label: 'Sign out', onClick: () => logout() }))));
 	}
 	function setBadge(tab, n) {
 		const b = $('#tabs').querySelector(`a[data-tab="${tab}"] .tab-badge`);
@@ -580,7 +594,7 @@ const App = (() => {
 
 	return {
 		start, rpc, call, uci, h, $, icon, row, group, sectionTitle, explain, hint, note, field, input, password, select, toggle, seg, btn, busy,
-		toast, sheet, confirm: confirmBox, qrSvg, fmt, register, every, go, route, info, sleep, logout, RpcError, pwa, setBadge, backTo,
+		toast, sheet, confirm: confirmBox, qrSvg, fmt, register, every, go, route, info, sleep, logout, RpcError, pwa, setBadge, backTo, openQuick,
 		get sid() { return sid; }
 	};
 })();

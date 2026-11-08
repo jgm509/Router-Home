@@ -12,6 +12,15 @@ App.register('system', {
 		const s0 = App.uci.sections(syscfg, 'system')[0] || {};
 		const rel = (board && board.release) || {};
 
+		/* Update Router Home: says when GitHub has a newer release */
+		const updSub = h('span', info.version ? `Version ${info.version}` : 'Install a new home-ui.tar.gz');
+		const updRow = row({ icon: 'box', label: 'Update Router Home', sub: updSub, onClick: openSelfUpdate });
+		App.rpc('home-ui', 'update_check', {}).then(u => {
+			if (u && u.newer) updSub.replaceChildren(`Version ${u.current} · `, h('b', { style: { color: 'var(--accent)' } }, `${u.latest} available`));
+		}).catch(() => { });
+		let openUpd = false; try { openUpd = sessionStorage.getItem('hu-open-update') === '1'; sessionStorage.removeItem('hu-open-update'); } catch (e) { }
+		if (openUpd) setTimeout(openSelfUpdate, 50);
+
 		const clock = h('span');
 		const tick = () => { clock.textContent = new Date().toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }); };
 
@@ -28,7 +37,7 @@ App.register('system', {
 			sectionTitle('Software'),
 			group(
 				row({ icon: 'upload', label: 'Update firmware', sub: rel.description || 'OpenWrt', onClick: () => openUpgrade() }),
-				row({ icon: 'box', label: 'Update Router Home', sub: info.version ? `Version ${info.version}` : 'Install a new home-ui.tar.gz', onClick: openSelfUpdate }),
+				updRow,
 				row({ icon: 'plus', label: 'Add-ons', sub: 'Support for this router\'s light, fan or modem', onClick: openAddons }),
 				row({ icon: 'download', label: 'Back up', sub: 'Settings, apps and sign-ins in one file', onClick: openBackup }),
 				row({ icon: 'refresh', label: 'Restore', sub: 'From a backup file', onClick: openRestore })),
@@ -339,6 +348,7 @@ function openBackup() {
 			group(
 				row({ icon: 'box', label: 'Everything (recommended)', sub: 'Settings, the apps you installed, Router Home, sign-ins (Proton, Tailscale) and files you added. Needs internet to check which apps OpenWrt still has.' }),
 				row({ icon: 'download', label: 'Settings only', sub: 'The standard OpenWrt backup. Apps you installed have to be reinstalled by hand.' })),
+			note('Keep the file private, like a password: it holds your WiFi passwords and VPN keys, and a full backup also holds your Proton and Tailscale sign-ins. Anyone with it can use them.', 'warn'),
 			status,
 			h('div', { class: 'actions' }, only, full));
 		return body;
@@ -517,9 +527,56 @@ function openFan(onDone) {
 
 /* ---------- Router Home self-update ---------- */
 
+/* GitHub release notes are Markdown: show them as plain text */
+const plainNotes = t => t.replace(/\r/g, '')
+	.replace(/^#{1,6}\s*/gm, '')				// headings
+	.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')		// [text](link) -> text
+	.replace(/(\*\*|__|`)/g, '')				// bold, code
+	.replace(/^\s*[-*]\s+/gm, '• ')			// list items
+	.trim();
+
 function openSelfUpdate() {
-	const { h, field, btn, busy, rpc, sheet, hint, note, toast, info, sleep } = App;
+	const { h, field, btn, busy, rpc, sheet, hint, note, toggle, info, sleep } = App;
 	sheet('Update Router Home', close => {
+		/* the new version is installed: sign in again so new permissions apply, then load the new files */
+		async function done(r) {
+			close();
+			const msg = h('p', { style: { color: 'var(--muted)', margin: '6px 2px' } },
+				`Updated from ${r.old || '?'} to ${r.new || '?'}. Reloading in a few seconds…`);
+			const s = sheet('Router Home updated', h('div', h('div', { class: 'lamp online', style: { margin: '10px auto 16px', width: '56px', height: '56px' } }), msg), { modal: true });
+			s.box.querySelector('.sheet-head button').hidden = true;
+			await sleep(4000);
+			App.logout();
+			location.replace('/home/?u=' + Date.now());
+		}
+
+		/* from GitHub */
+		const online = h('div', note('Checking for a new version…'));
+		const check = force => rpc('home-ui', 'update_check', { force }).then(show, e => show({ error: e.message }));
+		const again = () => { const b = btn('Check again', () => busy(b, () => check(true)), 'small secondary'); return b; };
+		function show(u) {
+			if (u.enabled === false && !u.latest) return online.replaceChildren(note('Checking for updates is off.'), h('div', { class: 'btn-row' }, again()));
+			if (u.error) return online.replaceChildren(note(u.error, 'warn'), h('div', { class: 'btn-row' }, again()));
+			if (!u.newer) return online.replaceChildren(note(`You have the latest version (${u.current}).`), h('div', { class: 'btn-row' }, again()));
+			const go = btn(`Update to ${u.latest}`, () => busy(go, async () => {
+				go.title = 'Downloading and installing…';
+				const r = await rpc('home-ui', 'update_install', {});
+				if (r && r.error) throw new Error(r.error);
+				await done(r);
+			}));
+			online.replaceChildren(
+				note(`Router Home ${u.latest} is available${u.published ? ` (released ${u.published})` : ''}. You have ${u.current}.`),
+				u.notes ? h('div', { style: { whiteSpace: 'pre-wrap', color: 'var(--muted)', margin: '10px 2px', maxHeight: '220px', overflow: 'auto' } }, plainNotes(u.notes)) : null,
+				h('div', { class: 'btn-row', style: { alignItems: 'center' } }, go, u.url ? h('a', { class: 'link', href: u.url, target: '_blank', rel: 'noopener' }, 'Release page') : null));
+		}
+		check(true);
+		const auto = toggle(true, async e => {
+			await rpc('home-ui', 'update_set', { enabled: e.target.checked });
+			App.toast(e.target.checked ? 'Router Home checks for updates once a day' : 'Update check turned off');
+		}, 'Check for updates');
+		rpc('home-ui', 'update_check', {}).then(u => { if (u && u.enabled === false) auto.checked = false; }).catch(() => { });
+
+		/* from a file */
 		const file = h('input', { type: 'file', accept: '.tar.gz,.tgz,.tar,application/gzip,application/x-tar' });
 		const status = h('div', { class: 'hint' });
 		const go = btn('Upload and install', () => busy(go, async () => {
@@ -531,22 +588,17 @@ function openSelfUpdate() {
 			status.textContent = 'Checking and installing…';
 			const r = await rpc('home-ui', 'self_update', {});
 			status.textContent = '';
-			close();
-			const msg = h('p', { style: { color: 'var(--muted)', margin: '6px 2px' } },
-				`Updated from ${r.old || '?'} to ${r.new || '?'}. Reloading in a few seconds…`);
-			const s = sheet('Router Home updated', h('div', h('div', { class: 'lamp online', style: { margin: '10px auto 16px', width: '56px', height: '56px' } }), msg), { modal: true });
-			s.box.querySelector('.sheet-head button').hidden = true;
-			await sleep(4000);
-			/* sign in again so new permissions apply, then load the new files */
-			App.logout();
-			location.replace('/home/?u=' + Date.now());
-		}));
+			await done(r);
+		}), 'secondary');
 		return h('div',
-			note(`Installed now: Router Home ${info.version || '(unknown version)'}`),
+			online,
+			h('div', { class: 'row', style: { padding: '10px 0', minHeight: 0 } },
+				h('span', { class: 'main' }, h('div', { class: 'label' }, 'Check once a day'), h('div', { class: 'sub' }, 'Asks GitHub whether a newer Router Home is out')), auto),
+			App.sectionTitle('Or install a file'),
 			h('div', { class: 'group' }, field('Update file', file)),
 			status,
-			hint('Use the home-ui.tar.gz file you received. Your settings (fan, WiFi, VPN and so on) are kept. You will be asked to sign in again afterwards.'),
-			h('div', { class: 'actions' }, btn('Cancel', close, 'secondary'), go));
+			hint('Your settings (fan, WiFi, VPN and so on) are kept either way. You will be asked to sign in again afterwards.'),
+			h('div', { class: 'actions' }, btn('Close', close, 'secondary'), go));
 	});
 }
 

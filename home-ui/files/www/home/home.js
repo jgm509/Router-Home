@@ -4,12 +4,13 @@
 /* a small live line chart. o: { lines: 1|2, points: 60, fmt: v => label, min: smallest top value, fixedMax } */
 function LiveChart(o) {
 	const NS = 'http://www.w3.org/2000/svg';
-	const W = 320, H = 170, L = 62, T = 8, B = 10;
+	let W = 320; const H = 170, L = 62, T = 8, B = 10;
 	const svg = document.createElementNS(NS, 'svg');
 	svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 	svg.setAttribute('preserveAspectRatio', 'none');
-	svg.innerHTML = '<g class="grid"></g><path class="a2"/><path class="a1"/><path class="l2"/><path class="l1"/>';
-	const [grid, a2, a1, l2, l1] = svg.children;
+	svg.innerHTML = '<g class="grid"></g><path class="a2"/><path class="a1"/><path class="l2"/><path class="l1"/><text class="chart-wait" text-anchor="middle"></text>';
+	const [grid, a2, a1, l2, l1, wait] = svg.children;
+	wait.setAttribute('x', (L + W) / 2); wait.setAttribute('y', (T + H - B) / 2 + 4);
 	let n = o.points || 60;
 	let hist = [];
 	const el = App.h('div', { class: 'chart' }, svg);
@@ -24,9 +25,11 @@ function LiveChart(o) {
 		let g = '';
 		for (let i = 0; i <= 3; i++) {
 			const y = T + (H - T - B) * (1 - i / 3);
-			g += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${o.fmt ? o.fmt(top * i / 3) : Math.round(top * i / 3)}</text>`;
+			g += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${o.fmt ? o.fmt(top * i / 3, true) : Math.round(top * i / 3)}</text>`;
 		}
 		grid.innerHTML = g;
+		// until two samples exist there is no line to draw
+		wait.textContent = hist.length < 2 ? 'Collecting…' : '';
 		const off = n - hist.length;
 		const xy = (k) => hist.map((x, i) => [L + (off + i) / (n - 1) * (W - L), T + (H - T - B) * (1 - Math.min(1, (x[k] || 0) / top))]);
 		const line = p => p.length < 2 ? '' : 'M' + p.map(q => q[0].toFixed(1) + ',' + q[1].toFixed(1)).join('L');
@@ -34,6 +37,14 @@ function LiveChart(o) {
 		const p1 = xy(0); l1.setAttribute('d', line(p1)); a1.setAttribute('d', area(p1));
 		if ((o.lines || 1) > 1) { const p2 = xy(1); l2.setAttribute('d', line(p2)); a2.setAttribute('d', area(p2)); }
 	}
+	// keep the drawing as wide as the box, so labels aren't stretched on wide screens
+	if (window.ResizeObserver) new ResizeObserver(() => {
+		const r = svg.getBoundingClientRect();
+		const w = r.height ? Math.max(200, Math.round(r.width * H / r.height)) : 320;
+		if (w === W) return;
+		W = w; svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+		wait.setAttribute('x', (L + W) / 2); draw();
+	}).observe(svg);
 	draw();
 	return {
 		el,
@@ -42,7 +53,8 @@ function LiveChart(o) {
 		clear() { hist = []; draw(); }
 	};
 }
-const rateLabel = v => { const [a, b] = App.fmt.rate(v); return `${+a} ${b}`; };
+/* axis: whole numbers from 10 up (67 Mbps, not 66.7), one decimal below */
+const rateLabel = (v, axis) => { const [a, b] = App.fmt.rate(v); const x = +a; return `${axis && x >= 10 ? Math.round(x) : x} ${b}`; };
 
 /* CPU use from two /proc/stat samples */
 const CpuMeter = () => { let last = null; return st => {
@@ -60,7 +72,7 @@ App.register('home', {
 
 		/* app bar */
 		const barDot = h('span', { class: 'dot' });
-		const appbar = h('div', { class: 'appbar' }, h('button', { type: 'button', onclick: openQuick }, barDot, h('span', info.hostname || 'Router'), icon('chev', 'chev-d')));
+		const appbar = h('div', { class: 'appbar' }, h('button', { type: 'button', onclick: App.openQuick }, barDot, h('span', info.hostname || 'Router'), icon('chev', 'chev-d')));
 
 		const lamp = h('div', { class: 'lamp checking' });
 		const headline = h('h1', 'Checking your connection…');
@@ -68,6 +80,17 @@ App.register('home', {
 		const fixLink = h('a', { class: 'link', href: '#/network/check', hidden: true, style: { display: 'inline-block', marginTop: '6px' } }, 'Find the problem');
 		const banner = h('div');
 		Diag.recoveredBanner().then(b => b && banner.replaceChildren(b));
+		/* a newer Router Home on GitHub (the router asks at most once a day) */
+		const updBanner = h('div');
+		App.rpc('home-ui', 'update_check', {}).then(u => {
+			let seen = ''; try { seen = localStorage.getItem('hu-update-later') || ''; } catch (e) { }
+			if (!u || !u.newer || seen === u.latest) return;
+			updBanner.replaceChildren(h('div', { class: 'note' },
+				h('div', `Router Home ${u.latest} is available (you have ${u.current}).`),
+				h('div', { class: 'btn-row', style: { marginTop: '8px' } },
+					App.btn('See update', () => { try { sessionStorage.setItem('hu-open-update', '1'); } catch (e) { } location.hash = '#/system'; }, 'small'),
+					App.btn('Later', () => { try { localStorage.setItem('hu-update-later', u.latest); } catch (e) { } updBanner.replaceChildren(); }, 'small secondary'))));
+		}).catch(() => { });
 
 		/* model / version */
 		const b = info.boardinfo || {}, rel = b.release || {};
@@ -100,8 +123,8 @@ App.register('home', {
 		/* clients */
 		const wiredV = h('div', { class: 'v' }, '—'), wlV = h('div', { class: 'v' }, '—');
 		const clientsCard = h('a', { class: 'card tiles', href: '#/devices' },
-			h('div', { class: 'tile' }, h('span', { class: 'ic' }, icon('interfaces')), h('div', h('div', { class: 'k' }, 'Wired clients'), wiredV)),
-			h('div', { class: 'tile' }, h('span', { class: 'ic acc' }, icon('wifi')), h('div', h('div', { class: 'k' }, 'Wireless clients'), wlV)),
+			h('div', { class: 'tile' }, h('span', { class: 'ic' }, icon('interfaces')), h('div', h('div', { class: 'k' }, 'Wired'), wiredV)),
+			h('div', { class: 'tile' }, h('span', { class: 'ic acc' }, icon('wifi')), h('div', h('div', { class: 'k' }, 'Wireless'), wlV)),
 			icon('chev', 'chev'));
 		clientsCard.lastChild.style.cssText = 'width:18px;height:18px;color:var(--muted)';
 
@@ -109,7 +132,7 @@ App.register('home', {
 		const extra = h('div');
 
 		page.append(
-			appbar, banner,
+			appbar, banner, updBanner,
 			h('div', { class: 'lamp-wrap' }, lamp, h('div', { class: 'lamp-text' }, headline, sub, fixLink)),
 			modelCard,
 			sectionTitle('Real-time network traffic', upName, 'chart'), traffic,
@@ -232,17 +255,6 @@ App.register('home', {
 			extra.replaceChildren(...(rows.length ? [sectionTitle('Shortcuts', null, 'link'), group(...rows)] : []));
 		});
 
-		function openQuick() {
-			App.sheet(info.hostname || 'Router', close => h('div',
-				group(
-					row({ icon: 'system', label: 'System settings', sub: 'Name, password, updates, backup', onClick: () => { close(); App.go('system'); } }),
-					row({ icon: 'palette', label: 'Appearance', value: Theme.name(), onClick: () => { close(); App.go('more/appearance'); } }),
-					row({ icon: 'power', label: 'Restart router', onClick: async () => {
-						if (!await App.confirm('Restart the router?', 'The internet will be down for about a minute.', 'Restart')) return;
-						await App.call('system', 'reboot'); App.toast('Restarting…'); close();
-					} }),
-					row({ icon: 'user', label: 'Sign out', onClick: () => App.logout() }))));
-		}
 	}
 });
 
