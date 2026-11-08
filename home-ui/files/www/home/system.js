@@ -16,7 +16,9 @@ App.register('system', {
 		const updSub = h('span', info.version ? `Version ${info.version}` : 'Install a new home-ui.tar.gz');
 		const updRow = row({ icon: 'box', label: 'Update Router Home', sub: updSub, onClick: openSelfUpdate });
 		App.rpc('home-ui', 'update_check', {}).then(u => {
-			if (u && u.newer) updSub.replaceChildren(`Version ${u.current} · `, h('b', { style: { color: 'var(--accent)' } }, `${u.latest} available`));
+			if (u && u.current && info.version && u.current !== info.version)
+				updSub.replaceChildren(`Version ${u.current} installed · `, h('a', { href: '#', onclick: e => { e.preventDefault(); e.stopPropagation(); location.replace('/home/?u=' + Date.now()); } }, 'reload the page'));
+			else if (u && u.newer) updSub.replaceChildren(`Version ${u.current} · `, h('b', { style: { color: 'var(--accent)' } }, `${u.latest} available`));
 		}).catch(() => { });
 		let openUpd = false; try { openUpd = sessionStorage.getItem('hu-open-update') === '1'; sessionStorage.removeItem('hu-open-update'); } catch (e) { }
 		if (openUpd) setTimeout(openSelfUpdate, 50);

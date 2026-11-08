@@ -83,6 +83,14 @@ App.register('home', {
 		/* a newer Router Home on GitHub (the router asks at most once a day) */
 		const updBanner = h('div');
 		App.rpc('home-ui', 'update_check', {}).then(u => {
+			/* updated meanwhile (the installer over SSH, another browser): this page is the old one */
+			if (u && u.current && info.version && u.current !== info.version) {
+				updBanner.replaceChildren(h('div', { class: 'note' },
+					h('div', `Router Home was updated to ${u.current}. Reload to use it.`),
+					h('div', { class: 'btn-row', style: { marginTop: '8px' } },
+						App.btn('Reload', () => location.replace('/home/?u=' + Date.now()), 'small'))));
+				return;
+			}
 			let seen = ''; try { seen = localStorage.getItem('hu-update-later') || ''; } catch (e) { }
 			if (!u || !u.newer || seen === u.latest) return;
 			updBanner.replaceChildren(h('div', { class: 'note' },
