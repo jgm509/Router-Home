@@ -12,7 +12,10 @@
 
 URL=${HOME_UI_URL:-https://github.com/jgm509/router-home/releases/latest/download/home-ui.tar.gz}
 TMP=/tmp/home-ui-install
-DEPS="rpcd rpcd-mod-file rpcd-mod-iwinfo rpcd-mod-luci rpcd-mod-ucode uhttpd uhttpd-mod-ubus cgi-io jsonfilter luci-base"
+# The Router Home release key (public half; tools/make-key.sh writes it here).
+# A downloaded release must carry a signature made with it.
+KEY='RWTOoFjNJn+QW24Rfhp2T5Xl6Wr/tz6n057P49tkvdQ0Bx/R+R6ng6xL'
+DEPS="rpcd rpcd-mod-file rpcd-mod-iwinfo rpcd-mod-luci rpcd-mod-ucode uhttpd uhttpd-mod-ubus cgi-io jsonfilter luci-base usign"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'Router Home: %s\n' "$*" >&2; rm -rf "$TMP"; exit 1; }
@@ -48,6 +51,13 @@ if [ -n "$1" ]; then
 else
 	say "Downloading Router Home…"
 	wget -q -O "$TMP/home-ui.tar.gz" "$URL" || die "the download failed (is the router online? does it have HTTPS support: ca-bundle and libustream?)."
+	if [ -n "$KEY" ]; then
+		wget -q -O "$TMP/home-ui.tar.gz.sig" "$URL.sig" || die "the signature download failed (home-ui.tar.gz.sig)."
+		printf 'untrusted comment: Router Home release key\n%s\n' "$KEY" > "$TMP/release.pub"
+		usign -V -q -m "$TMP/home-ui.tar.gz" -p "$TMP/release.pub" -x "$TMP/home-ui.tar.gz.sig" ||
+			die "the download isn't signed with the Router Home release key: not installed."
+		say "Signature checked."
+	fi
 fi
 tar -xzf "$TMP/home-ui.tar.gz" -C "$TMP" home-ui/files/usr/libexec/home-ui/self-update 2>/dev/null ||
 	die "this file isn't a Router Home release."

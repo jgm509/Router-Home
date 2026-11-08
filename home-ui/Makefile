@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=home-ui
-PKG_VERSION:=3.2.1
+PKG_VERSION:=3.2.2
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Router Home contributors
@@ -18,7 +18,7 @@ define Package/home-ui
   CATEGORY:=Administration
   TITLE:=Router Home - simple web interface at /home
   DEPENDS:=+rpcd +rpcd-mod-file +rpcd-mod-iwinfo +rpcd-mod-luci +rpcd-mod-ucode \
-	+uhttpd +uhttpd-mod-ubus +cgi-io +jsonfilter +luci-base
+	+uhttpd +uhttpd-mod-ubus +cgi-io +jsonfilter +luci-base +usign
   PKGARCH:=all
 endef
 
@@ -40,12 +40,16 @@ endef
 define Build/Prepare
 endef
 
+# the add-on catalog is packed from addons/ (it isn't kept packed in the source)
 define Build/Compile
+	sh $(CURDIR)/addons/pack.sh $(PKG_BUILD_DIR)/catalog
 endef
 
 define Package/home-ui/install
 	$(CP) ./files/* $(1)/
 	$(INSTALL_DIR) $(1)/usr/share/home-ui/addons
+	$(INSTALL_DIR) $(1)/usr/share/home-ui/catalog
+	$(CP) $(PKG_BUILD_DIR)/catalog/*.tar.gz $(1)/usr/share/home-ui/catalog/
 	$(INSTALL_BIN) ./files/usr/libexec/rpcd/home-ui $(1)/usr/libexec/rpcd/home-ui
 	$(INSTALL_BIN) ./files/usr/libexec/home-ui/esim-job $(1)/usr/libexec/home-ui/esim-job
 	$(INSTALL_BIN) ./files/usr/libexec/home-ui/self-update $(1)/usr/libexec/home-ui/self-update

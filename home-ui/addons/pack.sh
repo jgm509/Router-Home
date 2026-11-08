@@ -1,15 +1,16 @@
 #!/bin/sh
-# Pack every add-on folder here into <id>.tar.gz:
-#   - into ../files/usr/share/home-ui/catalog/ (shipped with Router Home)
-#   - and into ./dist/ (to share or install by hand)
+# Pack every add-on folder here into <id>.tar.gz, in the folder given
+# (tools/make-release.sh and the OpenWrt Makefile use it to build the catalog;
+# the packed files aren't kept in the source tree).
+#   addons/pack.sh /tmp/catalog
 set -e
+OUT="$1"
+[ -n "$OUT" ] || { echo "usage: $0 <output folder>" >&2; exit 1; }
+mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 cd "$(dirname "$0")"
-CAT=../files/usr/share/home-ui/catalog
-rm -rf "$CAT" dist; mkdir -p "$CAT" dist
 for d in */; do
 	id="${d%/}"
 	[ -f "$id/addon.json" ] || continue
-	tar --owner=0 --group=0 -czf "dist/$id.tar.gz" "$id"
-	cp "dist/$id.tar.gz" "$CAT/"
+	tar --owner=0 --group=0 -czf "$OUT/$id.tar.gz" "$id"
 	echo "packed $id"
 done

@@ -72,6 +72,17 @@ System → More → **Install as an app**. Browsers only make a full app (own wi
 
 Router Home checks GitHub once a day for a newer release and says so on the dashboard; System → Software → **Update Router Home** then installs it in one tap. The check only asks GitHub for the latest version number and can be turned off in that same screen. You can also run the installer again, or pick a `home-ui.tar.gz` file there (`.tgz` and `.tar` work too). Settings are kept; you sign in again afterwards.
 
+Releases are signed. Since 3.2.2 an online update (from the app or the installer) is installed only if `home-ui.tar.gz` matches the checksum GitHub lists for it and carries a `home-ui.tar.gz.sig` made with the Router Home release key. The router checks it with `usign` against the public key it already has (`/usr/share/home-ui/release.pub`), never one from the download, so even someone who took over the GitHub account couldn't push an update. A file you pick yourself isn't checked: only install files you trust.
+
+### Making a release
+
+```sh
+tools/make-key.sh            # once, ever: makes ~/router-home-keys/release.sec (keep it private and backed up)
+tools/make-release.sh 3.2.2  # sets the version, packs the add-ons, signs; files land in release/
+```
+
+Attach the three files in `release/` (`home-ui.tar.gz`, `home-ui.tar.gz.sig`, `install.sh`) to a GitHub release tagged `v3.2.2`. The tools use the `usign` an OpenWrt build tree already has (`staging_dir/host/bin/usign`), or `USIGN=/path/to/usign`.
+
 ## Files
 
 | Path | What it is |
@@ -94,7 +105,7 @@ Router Home checks GitHub once a day for a newer release and says so on the dash
 | `usr/sbin/home-ui-fan`, `usr/sbin/home-ui-fan-gpio`, `etc/init.d/home-ui-fan`, `etc/config/fan` | Fan control service (driver fans, GPIO fans) |
 | `usr/sbin/home-ui-light`, `etc/init.d/home-ui-light`, `etc/config/home-ui-light`, `usr/share/home-ui/light.sh` | Status light for any router |
 | `usr/share/home-ui/addons.sh`, `usr/libexec/home-ui/addon`, `usr/share/home-ui/addons/`, `usr/share/home-ui/catalog/` | Add-ons: helpers, installer, installed add-ons, add-ons shipped with Router Home |
-| `addons/` (source only) | Add-on sources and `pack.sh`, which builds the catalog |
+| `addons/` (source only) | Add-on sources; `pack.sh` packs them into the catalog when the package or a release is built |
 | `usr/share/rpcd/acl.d/home-ui.json` | Permissions |
 | `usr/share/luci/menu.d/home-ui.json`, `www/luci-static/resources/view/home-ui/open.js` | "Simple mode" link in LuCI |
 | `etc/config/home-ui` | Small settings file (WireGuard server public address) |
