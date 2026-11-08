@@ -3,7 +3,13 @@
 #
 #   update-check [force]   JSON: current, latest, newer, notes, url, enabled
 #                          (asks GitHub at most once a day unless "force")
-#   update-check install   download the latest release and install it
+#   update-check install   download the latest release, check it and install it
+#
+# A downloaded release must match the sha256 GitHub lists for it and, once
+# /usr/share/home-ui/release.pub exists, carry a home-ui.tar.gz.sig made with
+# that key (usign). The key comes from the installed Router Home, never from the
+# download, so a release can only replace Router Home if it was signed by the
+# same person who signed the installed one.
 #
 # The repository is home-ui.main.update_repo (default jgm509/router-home);
 # home-ui.main.update_check=0 turns the check off.
@@ -12,6 +18,9 @@
 RUN=/tmp/home-ui
 CACHE=$RUN/update-check.json
 MAXAGE=86400
+KEY=/usr/share/home-ui/release.pub
+DL=/tmp/home-ui-update.tar.gz
+KEYED=0; [ -s "$KEY" ] && KEYED=1
 CUR=$(cat /usr/share/home-ui/version 2>/dev/null)
 REPO=$(uci -q get home-ui.main.update_repo); REPO=${REPO:-jgm509/router-home}
 ENABLED=$(uci -q get home-ui.main.update_check); [ "$ENABLED" = 0 ] || ENABLED=1
@@ -29,14 +38,27 @@ fail() { json_init; json_add_string current "$CUR"; json_add_boolean enabled "$E
 
 case "$1" in
 install)
-	[ -s "$CACHE" ] || "$0" force >/dev/null
+	"$0" force >/dev/null	# fresh links: the cached ones may be a day old
 	URL=$(jsonfilter -i "$CACHE" -e '@.asset' 2>/dev/null)
 	[ -n "$URL" ] || fail "The release has no home-ui.tar.gz to download"
-	rm -f /tmp/home-ui-update.tar.gz
-	fetch "$URL" /tmp/home-ui-update.tar.gz || fail "The download failed. Is the router online?"
-	[ "$(wc -c < /tmp/home-ui-update.tar.gz)" -le $((8 * 1024 * 1024)) ] || { rm -f /tmp/home-ui-update.tar.gz; fail "The download is too big for a Router Home update"; }
-	rm -f "$CACHE"
-	exec /usr/libexec/home-ui/self-update /tmp/home-ui-update.tar.gz
+	SIG=$(jsonfilter -i "$CACHE" -e '@.sig' 2>/dev/null)
+	SUM=$(jsonfilter -i "$CACHE" -e '@.digest' 2>/dev/null); SUM=${SUM#sha256:}
+	if [ -s "$KEY" ]; then
+		command -v usign >/dev/null || fail "usign is missing, so the update can't be checked. Install it (apk add usign, or opkg install usign) and try again"
+		[ -n "$SIG" ] || fail "This release isn't signed, so Router Home won't install it. Download home-ui.tar.gz yourself and use Install from a file if you trust it"
+	fi
+	bad() { rm -f "$DL" "$DL.sig"; fail "$1"; }
+	rm -f "$DL" "$DL.sig"
+	fetch "$URL" "$DL" || bad "The download failed. Is the router online?"
+	[ "$(wc -c < "$DL")" -le $((8 * 1024 * 1024)) ] || bad "The download is too big for a Router Home update"
+	[ -z "$SUM" ] || [ "$(sha256sum "$DL" | cut -d' ' -f1)" = "$SUM" ] || bad "The download is damaged (its checksum doesn't match). Try again"
+	if [ -s "$KEY" ]; then
+		fetch "$SIG" "$DL.sig" || bad "The signature could not be downloaded. Try again"
+		usign -V -q -m "$DL" -p "$KEY" -x "$DL.sig" 2>/dev/null ||
+			bad "This release is not signed with the Router Home release key, so it was not installed"
+	fi
+	rm -f "$CACHE" "$DL.sig"
+	exec /usr/libexec/home-ui/self-update "$DL"
 	;;
 esac
 
@@ -49,7 +71,7 @@ if [ "$1" != force ] && [ -s "$CACHE" ] && [ -n "$(find "$CACHE" -mmin -$((MAXAG
 	L=$(jsonfilter -i "$CACHE" -e '@.latest' 2>/dev/null)
 	# the installed version may have changed since: work "newer" out again
 	json_load "$(cat "$CACHE")"; json_add_string current "$CUR"; json_add_boolean newer "$(newer "$L" "$CUR")"
-	json_add_boolean enabled "$ENABLED"; json_dump; exit 0
+	json_add_boolean enabled "$ENABLED"; json_add_boolean verify "$KEYED"; json_dump; exit 0
 fi
 
 T=$RUN/update-release.json
@@ -63,9 +85,14 @@ json_add_string notes "$(jsonfilter -i "$T" -e '@.body' 2>/dev/null | head -c 40
 json_add_string published "$(jsonfilter -i "$T" -e '@.published_at' 2>/dev/null | cut -c1-10)"
 json_add_string url "$(jsonfilter -i "$T" -e '@.html_url' 2>/dev/null)"
 json_add_string asset "$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz"].browser_download_url' 2>/dev/null)"
+json_add_string digest "$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz"].digest' 2>/dev/null)"
+SIGURL=$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz.sig"].browser_download_url' 2>/dev/null)
+json_add_string sig "$SIGURL"
+json_add_boolean signed "$([ -n "$SIGURL" ] && echo 1 || echo 0)"
 json_dump > "$CACHE.$$" && mv "$CACHE.$$" "$CACHE"
 rm -f "$T"
 json_add_string current "$CUR"
 json_add_boolean newer "$(newer "$TAG" "$CUR")"
 json_add_boolean enabled "$ENABLED"
+json_add_boolean verify "$KEYED"
 json_dump

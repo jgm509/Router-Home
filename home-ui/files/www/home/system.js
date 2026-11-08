@@ -567,8 +567,10 @@ function openSelfUpdate() {
 				if (r && r.error) throw new Error(r.error);
 				await done(r);
 			}));
+			if (u.verify && !u.signed) go.disabled = true;
 			online.replaceChildren(
-				note(`Router Home ${u.latest} is available${u.published ? ` (released ${u.published})` : ''}. You have ${u.current}.`),
+				note(`Router Home ${u.latest} is available${u.published ? ` (released ${u.published})` : ''}. You have ${u.current}.` +
+					(u.signed ? ' It is signed with the Router Home release key, checked before installing.' : u.verify ? ' It isn\'t signed, so it can\'t be installed from here.' : '')),
 				u.notes ? h('div', { style: { whiteSpace: 'pre-wrap', color: 'var(--muted)', margin: '10px 2px', maxHeight: '220px', overflow: 'auto' } }, plainNotes(u.notes)) : null,
 				h('div', { class: 'btn-row', style: { alignItems: 'center' } }, go, u.url ? h('a', { class: 'link', href: u.url, target: '_blank', rel: 'noopener' }, 'Release page') : null));
 		}

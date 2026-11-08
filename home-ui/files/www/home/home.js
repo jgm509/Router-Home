@@ -102,8 +102,11 @@ App.register('home', {
 
 		/* model / version */
 		const b = info.boardinfo || {}, rel = b.release || {};
-		const ver = (rel.version || '').replace(/-.*/, '');
+		/* a release shows its number ("24.10.4"), a snapshot its build ("r38099"),
+		   so the card doesn't read "SNAPSHOT Snapshot" */
 		const stable = /^\d+\.\d+\.\d+$/.test(rel.version || '');
+		const ver = stable || !/snapshot/i.test(rel.version || '') ? (rel.version || '').replace(/-.*/, '')
+			: (String(rel.revision || '').match(/^r\d+/) || [''])[0] || rel.version;
 		const modelCard = h('div', { class: 'card duo' },
 			h('div', h('div', { class: 'k' }, 'Model'), h('div', { class: 'v' }, b.model || b.board_name || 'Router')),
 			h('div', h('div', { class: 'k' }, rel.distribution || 'OpenWrt'), h('div', { class: 'v' }, ver || '—', ver ? h('span', { class: 'pill' + (stable ? '' : ' warn') }, stable ? 'Stable' : 'Snapshot') : null)));
@@ -256,15 +259,32 @@ App.register('home', {
 				const m = await call('home-ui', 'modem_status');
 				const g = m && m.modem && m.modem.modem && m.modem.modem.generic;
 				const op = m && m.modem && m.modem.modem && m.modem.modem['3gpp'];
-				rows.push(row({ icon: 'antenna', label: op && op['operator-name'] ? op['operator-name'] : 'Mobile modem',
-					sub: g ? `${techName(g['access-technologies'])} · signal ${g['signal-quality'] && g['signal-quality'].value || 0}%` : 'Starting up (can take 2 minutes after boot)',
-					href: '#/network/mobile' }));
+				rows.push(row({ icon: 'antenna', label: mmVal(op && op['operator-name']) || 'Mobile modem',
+					sub: modemLine(g), href: '#/network/mobile' }));
 			}
 			extra.replaceChildren(...(rows.length ? [sectionTitle('Shortcuts', null, 'link'), group(...rows)] : []));
 		});
 
 	}
 });
+
+/* ModemManager writes "--" for a value it doesn't have */
+function mmVal(v) { v = String(v == null ? '' : v).trim(); return v === '--' ? '' : v; }
+
+/* one line for the modem shortcut: only a registered modem has a network and a signal */
+function modemLine(g) {
+	if (!g) return 'Starting up (can take 2 minutes after boot)';
+	const st = mmVal(g.state), sig = g['signal-quality'] && +mmVal(g['signal-quality'].value) || 0;
+	const tech = [].concat(g['access-technologies'] || []).map(mmVal).filter(Boolean);
+	if (st === 'connected' || st === 'registered' || st === 'connecting')
+		return [tech.length ? techName(tech) : null, st === 'connected' ? null : (st === 'connecting' ? 'Connecting…' : 'Not connected'), sig ? `signal ${sig}%` : null].filter(Boolean).join(' · ');
+	return {
+		failed: mmVal(g['state-failed-reason']) === 'sim-missing' ? 'No SIM or eSIM profile' : 'The modem reports a problem',
+		locked: 'The SIM is locked (PIN)',
+		disabled: 'Turned off', disabling: 'Turning off…', enabling: 'Turning on…',
+		searching: 'Looking for a network…', initializing: 'Starting up…', enabled: 'Looking for a network…'
+	}[st] || 'No network';
+}
 
 function encName(e) {
 	e = e || 'none';
