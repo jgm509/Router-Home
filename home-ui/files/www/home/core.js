@@ -18,7 +18,26 @@ const App = (() => {
 	};
 
 	let rpcId = 1;
+	/* while the router's backend restarts (after a Router Home update) every
+	 * request would fail or look like a lost sign-in: hold them all back */
+	let holding = false;
+	async function restartWait(maxMs) {
+		holding = true;
+		const until = Date.now() + (maxMs || 45000);
+		await new Promise(r => setTimeout(r, 2500));		// the restart starts ~2 s after the update
+		while (Date.now() < until) {
+			try {
+				const res = await fetch('/ubus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+					body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'call', params: [NULL_SID, 'session', 'access', {}] }) });
+				const j = await res.json();
+				if (j && Array.isArray(j.result)) return true;	// rpcd answers again ("Object not found" while it restarts)
+			} catch (e) { }
+			await new Promise(r => setTimeout(r, 1000));
+		}
+		return false;
+	}
 	async function rpc(object, method, params, opts) {
+		if (holding) return new Promise(() => { });	// answered after the reload instead
 		const body = { jsonrpc: '2.0', id: rpcId++, method: 'call', params: [ (opts && opts.sid) || sid || NULL_SID, object, method, params || {} ] };
 		let res;
 		try {
@@ -594,7 +613,7 @@ const App = (() => {
 
 	return {
 		start, rpc, call, uci, h, $, icon, row, group, sectionTitle, explain, hint, note, field, input, password, select, toggle, seg, btn, busy,
-		toast, sheet, confirm: confirmBox, qrSvg, fmt, register, every, go, route, info, sleep, logout, RpcError, pwa, setBadge, backTo, openQuick,
+		toast, sheet, confirm: confirmBox, qrSvg, fmt, register, every, go, route, info, sleep, logout, RpcError, pwa, setBadge, backTo, openQuick, restartWait,
 		get sid() { return sid; }
 	};
 })();

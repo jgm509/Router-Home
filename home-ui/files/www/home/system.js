@@ -542,11 +542,12 @@ function openSelfUpdate() {
 		async function done(r) {
 			close();
 			const msg = h('p', { style: { color: 'var(--muted)', margin: '6px 2px' } },
-				`Updated from ${r.old || '?'} to ${r.new || '?'}. Reloading in a few seconds…`);
+				`Updated from ${r.old || '?'} to ${r.new || '?'}. Restarting the router's web service, then you sign in again…`);
 			const s = sheet('Router Home updated', h('div', h('div', { class: 'lamp online', style: { margin: '10px auto 16px', width: '56px', height: '56px' } }), msg), { modal: true });
 			s.box.querySelector('.sheet-head button').hidden = true;
-			await sleep(4000);
-			App.logout();
+			/* the restart signs everyone out: wait until it's back, then load the new files */
+			await App.restartWait();
+			try { sessionStorage.removeItem('home-sid'); } catch (e) { }
 			location.replace('/home/?u=' + Date.now());
 		}
 

@@ -70,8 +70,11 @@ done
 rm -rf "$WORK" "$ARCHIVE"
 [ -z "$R" ] && logger -t home-ui "updated $OLD -> $NEW"
 
-# reload rpcd (new backend + permissions) after this reply has been sent;
-# SIGHUP keeps login sessions
-[ -z "$R" ] && ( sleep 2; kill -HUP "$(pidof rpcd)" 2>/dev/null || /etc/init.d/rpcd restart ) >/dev/null 2>&1 </dev/null &
+# reload rpcd after this reply has been sent. SIGHUP makes rpcd re-execute
+# itself in place: it picks up the new backend and permissions and keeps the
+# login sessions. Never "/etc/init.d/rpcd restart" from here: this runs in
+# rpcd's own process group, so stopping rpcd also kills the restart and rpcd
+# stays down (nobody can sign in, LuCI included).
+[ -z "$R" ] && ( sleep 2; kill -HUP "$(pidof rpcd)" 2>/dev/null || /etc/init.d/rpcd start ) >/dev/null 2>&1 </dev/null &
 
 printf '{"ok":true,"old":"%s","new":"%s"}\n' "$OLD" "$NEW"
