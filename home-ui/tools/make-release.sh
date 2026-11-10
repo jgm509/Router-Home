@@ -14,7 +14,10 @@ PUB=files/usr/share/home-ui/release.pub
 die() { echo "make-release: $*" >&2; exit 1; }
 [ -s "$SEC" ] || die "no secret key at $SEC (first time? run tools/make-key.sh)"
 [ -s "$PUB" ] || die "no $PUB (run tools/make-key.sh)"
-grep -q "^KEY='$(sed -n 2p "$PUB")'" install.sh || die "install.sh has a different key than $PUB"
+# install.sh carries the same public key as release.pub: write it in (a fresh
+# copy of the source has an empty KEY line)
+sed -i "s|^KEY='[^']*'|KEY='$(sed -n 2p "$PUB")'|" install.sh
+grep -q "^KEY='$(sed -n 2p "$PUB")'" install.sh || die "could not write the key from $PUB into install.sh"
 
 sh tools/set-version.sh "$V"
 
