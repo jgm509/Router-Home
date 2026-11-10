@@ -11,7 +11,7 @@ LuCI stays available for everything else.
 On the router, over SSH (`ssh root@192.168.1.1`):
 
 ```sh
-wget -O- https://github.com/jgm509/router-home/releases/latest/download/install.sh | sh
+wget -O- https://raw.githubusercontent.com/jgm509/router-home/main/home-ui/install.sh | sh
 ```
 
 It installs what Router Home needs, checks the download's signature and sets everything up. Then open `http://192.168.1.1/home` and sign in with the router's root password.
