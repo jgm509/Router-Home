@@ -2,6 +2,7 @@
 # Router Home: more mobile modem controls (ModemManager + qmicli).
 #   modem-extra info              signal per band, carrier aggregation, cells, bands (JSON)
 #   modem-extra bands <b1|b2|…|any>   lock to these bands (ModemManager names: eutran-7, ngran-78) or any
+#   modem-extra sim-slot <n>      make SIM slot n the one the modem uses (it restarts)
 #   modem-extra sms-list | sms-send <file with number\ntext> | sms-delete <index>
 #   modem-extra time | time-set   network time from the carrier / set the router clock from it
 #   modem-extra gps-status | gps-get | gps-install <tar.gz> | gps-remove
@@ -47,6 +48,12 @@ bands)
 	case "$2" in ''|*[!a-z0-9\|-]*) echo '{"error":"bad band list"}'; exit 0 ;; esac
 	out="$(mm -m any --set-current-bands="$2" 2>&1)"
 	if echo "$out" | grep -qi 'success'; then logger -t home-ui "modem bands set to $2"; echo '{"ok":true}'
+	else printf '{"error":"%s"}\n' "$(esc "$(echo "$out" | tail -n 2)")"; fi
+	;;
+sim-slot)
+	case "$2" in [1-9]) ;; *) echo '{"error":"bad slot"}'; exit 0 ;; esac
+	out="$(mm -m any --set-primary-sim-slot="$2" 2>&1)"
+	if echo "$out" | grep -qi 'success'; then logger -t home-ui "modem primary SIM slot set to $2"; echo '{"ok":true}'
 	else printf '{"error":"%s"}\n' "$(esc "$(echo "$out" | tail -n 2)")"; fi
 	;;
 sms-list)

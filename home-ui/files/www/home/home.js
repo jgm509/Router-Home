@@ -256,11 +256,12 @@ App.register('home', {
 			if (nets.some(i => i.config.key || (i.config.encryption || 'none') === 'none'))
 				rows.push(row({ icon: 'qr', label: 'Share WiFi', sub: 'Show a code guests can scan', onClick: () => WifiShare.pick(nets) }));
 			if (info.modem) {
-				const m = await call('home-ui', 'modem_status');
-				const g = m && m.modem && m.modem.modem && m.modem.modem.generic;
-				const op = m && m.modem && m.modem.modem && m.modem.modem['3gpp'];
+				const [m, ifs] = await Promise.all([call('home-ui', 'modem_status'), Data.interfaces().catch(() => [])]);
+				const mm = m && m.modem && m.modem.modem;
+				const op = mm && mm['3gpp'];
+				const errs = [].concat(...ifs.filter(i => Data.isModemProto(i.proto)).map(i => (i.errors || []).map(e => e.code)));
 				rows.push(row({ icon: 'antenna', label: mmVal(op && op['operator-name']) || 'Mobile modem',
-					sub: modemLine(g), href: '#/network/mobile' }));
+					sub: m && m.simple ? [m.simple.carrier, m.simple.state === 'connected' ? 'Connected' : m.simple.state].filter(Boolean).join(' · ') || 'Mobile modem' : modemLine(mm, errs), href: '#/network/mobile' }));
 			}
 			extra.replaceChildren(...(rows.length ? [sectionTitle('Shortcuts', null, 'link'), group(...rows)] : []));
 		});
@@ -271,19 +272,78 @@ App.register('home', {
 /* ModemManager writes "--" for a value it doesn't have */
 function mmVal(v) { v = String(v == null ? '' : v).trim(); return v === '--' ? '' : v; }
 
-/* one line for the modem shortcut: only a registered modem has a network and a signal */
-function modemLine(g) {
-	if (!g) return 'Starting up (can take 2 minutes after boot)';
-	const st = mmVal(g.state), sig = g['signal-quality'] && +mmVal(g['signal-quality'].value) || 0;
+/* the bands the modem is locked to ("B5, B7"), or '' when it may use all of them */
+function mmBandLock(g) {
+	const sup = ((g && g['supported-bands']) || []).filter(b => b !== 'any' && b !== 'unknown'), cur = (g && g['current-bands']) || [];
+	if (!sup.length || !cur.length || cur.includes('any') || cur.length >= sup.length) return '';
+	const kind = b => /^eutran-/.test(b) ? 'lte' : /^ngran-/.test(b) ? 'nr' : 'other';
+	const name = b => { let m = /^eutran-(\d+)$/.exec(b); if (m) return `B${m[1]}`; m = /^ngran-(\d+)$/.exec(b); if (m) return `n${m[1]}`; return b.replace(/^utran-/, '3G ').replace(/^g-?/, ''); };
+	const supNr = sup.filter(b => kind(b) === 'nr'), allNr = supNr.length && supNr.every(b => cur.includes(b));
+	const l = cur.filter(b => !(allNr && kind(b) === 'nr')).map(name);
+	return l.length > 6 ? l.slice(0, 6).join(', ') + '…' : l.join(', ');
+}
+
+/* What the modem is doing, in plain words.
+   mm = ModemManager's "modem" object; errs = the error codes netifd has for its connection.
+   -> { state, detail, level ('good' | 'warn' | 'bad' | ''), online, slot (a SIM slot to switch to) } */
+function modemPlain(mm, errs) {
+	const g = (mm && mm.generic) || {}, op = (mm && mm['3gpp']) || {};
+	const st = mmVal(g.state), reg = mmVal(op['registration-state']), why = mmVal(g['state-failed-reason']);
+	const lock = mmBandLock(g);
+	const lockNote = lock ? `The bands are locked to ${lock}, so a network on any other band can't be used.` : '';
+	const regFailed = (errs || []).some(c => /REGISTRATION/.test(c));
+	if (st === 'connected') return { state: 'Connected', level: 'good', online: true };
+	if (reg === 'denied') return { state: 'Refused by the network', level: 'bad',
+		detail: 'The mobile network refused this SIM. The plan may have expired, or the SIM isn\'t allowed on the networks here.' };
+	if (st === 'connecting') return { state: 'Connecting…', online: true };
+	if (st === 'registered') return { state: 'On the network, not connected', level: 'warn', online: true,
+		detail: 'The modem found a network but has no data connection. If it stays this way, check the APN.' };
+	if (st === 'searching' || st === 'enabled') return { state: 'Looking for a network…', detail: lockNote || null, level: lock ? 'warn' : '' };
+	if (st === 'failed' && why === 'sim-missing') {
+		const slots = g['sim-slots'] || [], prim = +mmVal(g['primary-sim-slot']) || 0;
+		const other = slots.findIndex((p, i) => mmVal(p) && p !== '/' && i + 1 !== prim);
+		return other >= 0 && prim ? { state: 'Using an empty SIM slot', level: 'bad', slot: other + 1,
+			detail: `The modem is set to SIM slot ${prim}, which is empty. The SIM or eSIM is in slot ${other + 1}.` }
+			: { state: 'No SIM or eSIM profile', level: 'bad', detail: 'The modem sees no SIM. Turn on an eSIM profile below, or put in a SIM.' };
+	}
+	if (st === 'failed') return { state: 'The modem reports a problem', level: 'bad', detail: why ? `Reason given by the modem: ${why.replace(/-/g, ' ')}.` : null };
+	if (st === 'locked') return { state: 'The SIM is locked (PIN)', level: 'bad', detail: 'The SIM asks for its PIN. Turn the PIN lock off with a phone, then put the SIM back.' };
+	if (st === 'disabled') return regFailed ? { state: 'Turned off: no network accepted it', level: 'warn',
+		detail: ['The modem couldn\'t register on a mobile network, so it was turned off. The usual causes: the plan expired, there is no signal here, or the bands are locked.', lockNote, 'Use Reconnect on the mobile connection to try again.'].filter(Boolean).join(' ') }
+		: { state: 'Turned off' };
+	return { state: ({ disabling: 'Turning off…', enabling: 'Turning on…', initializing: 'Starting up…' })[st] || (st ? st[0].toUpperCase() + st.slice(1) : 'No network') };
+}
+
+/* one line for the modem shortcut: only a modem on a network has a technology and a signal */
+function modemLine(mm, errs) {
+	if (!mm) return 'Starting up (can take 2 minutes after boot)';
+	const g = mm.generic || {}, p = modemPlain(mm, errs);
+	if (!p.online) return p.state;
+	const sig = g['signal-quality'] && +mmVal(g['signal-quality'].value) || 0;
 	const tech = [].concat(g['access-technologies'] || []).map(mmVal).filter(Boolean);
-	if (st === 'connected' || st === 'registered' || st === 'connecting')
-		return [tech.length ? techName(tech) : null, st === 'connected' ? null : (st === 'connecting' ? 'Connecting…' : 'Not connected'), sig ? `signal ${sig}%` : null].filter(Boolean).join(' · ');
-	return {
-		failed: mmVal(g['state-failed-reason']) === 'sim-missing' ? 'No SIM or eSIM profile' : 'The modem reports a problem',
-		locked: 'The SIM is locked (PIN)',
-		disabled: 'Turned off', disabling: 'Turning off…', enabling: 'Turning on…',
-		searching: 'Looking for a network…', initializing: 'Starting up…', enabled: 'Looking for a network…'
-	}[st] || 'No network';
+	return [tech.length ? techName(tech) : null, p.state === 'Connected' ? null : p.state, sig ? `signal ${sig}%` : null].filter(Boolean).join(' · ');
+}
+
+/* netifd's error codes for a connection, in plain words */
+function ifaceErrorText(i) {
+	const codes = ((i && i.errors) || []).map(e => e.code).filter(Boolean);
+	if (!codes.length) return '';
+	const known = {
+		MM_3GPP_OPERATOR_REGISTRATION_FAILED: 'Couldn\'t register on a mobile network',
+		MM_PINCODE_REQUIRED: 'The SIM asks for its PIN', MM_PINCODE_WRONG: 'The SIM PIN is wrong',
+		MM_CONNECT_FAILED: 'The mobile data connection failed (check the APN)',
+		MM_CONNECT_IN_PROGRESS: 'Connecting…', MM_DISCONNECT_IN_PROGRESS: 'Disconnecting…',
+		MM_MODEM_DISABLED: 'The modem is turned off', MM_INTERFACE_NOT_FOUND: 'The modem\'s network port is missing',
+		DEVICE_NOT_MANAGED: 'The modem wasn\'t found', NO_DEVICE: 'The port or device is missing',
+		NO_IFACE: 'The network port is missing', NO_IFNAME: 'The network port is missing',
+		SETUP_FAILED: 'Setting up the connection failed', MISSING_ADDRESS: 'No address is set',
+		NO_WAN_ADDRESS: 'No internet address yet', NO_WAN_LINK: 'No link on the internet port',
+		CONNECT_FAILED: 'Connecting failed', AUTH_FAILED: 'Sign-in was refused (check the user name and password)',
+		PIN_FAILED: 'The SIM PIN was refused', NO_NETWORK: 'No mobile network found'
+	};
+	return codes.map(c => known[c]
+		|| (/SIM_MISSING/.test(c) ? 'No SIM or eSIM profile' : /REGISTRATION/.test(c) ? 'Couldn\'t register on a mobile network' : /PIN|PUK/.test(c) ? 'The SIM is locked' : null)
+		|| c.replace(/^MM_/, '').replace(/_/g, ' ').toLowerCase().replace(/^./, x => x.toUpperCase()) + ` (${c})`).join('; ');
 }
 
 function encName(e) {

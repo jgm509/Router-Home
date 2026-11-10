@@ -110,7 +110,7 @@ async function renderOverview(page) {
 			const cfg = netcfg[i.interface] || {};
 			const state = i.up ? 'on' : (cfg.disabled === '1' || cfg.auto === '0' ? '' : 'warn');
 			const subText = i.up ? [Data.PROTO_NAME[i.proto] || i.proto, Net.ipv4(i) || ((i['ipv6-address'] || [])[0] || {}).address, i.uptime ? 'for ' + fmt.duration(i.uptime) : ''].filter(Boolean).join(' · ')
-				: (cfg.auto === '0' || cfg.disabled === '1' ? 'Stopped' : (i.errors && i.errors.length ? 'Error: ' + i.errors.map(e => e.code).join(', ') : 'Not connected'));
+				: (cfg.auto === '0' || cfg.disabled === '1' ? 'Stopped' : (ifaceErrorText(i) || 'Not connected'));
 			return row({
 				icon: Data.isModemProto(i.proto) ? 'antenna' : i.proto === 'wireguard' ? 'vpn' : 'globe',
 				iconColor: i.up ? 'var(--online)' : null,
@@ -179,7 +179,7 @@ function openInterface(i, cfg, reload) {
 		return h('div',
 			wbox,
 			h('div', { class: 'group' }, h('dl', { class: 'kv' },
-				h('dt', 'Status'), h('dd', i.up ? `Connected for ${fmt.duration(i.uptime)}` : 'Not connected'),
+				h('dt', 'Status'), h('dd', i.up ? `Connected for ${fmt.duration(i.uptime)}` : (ifaceErrorText(i) || 'Not connected')),
 				h('dt', 'Type'), h('dd', Data.PROTO_NAME[p] || p),
 				Net.ipv4(i) ? [h('dt', 'Address'), h('dd', Net.ipv4(i))] : null,
 				(i['ipv6-address'] || []).length ? [h('dt', 'IPv6'), h('dd', i['ipv6-address'].map(a => a.address).join(', '))] : null,
@@ -510,21 +510,37 @@ async function renderMobile(page) {
 		const q = +(g['signal-quality'] && g['signal-quality'].value) || 0;
 		/* 5G non-standalone reports a 5G leg even when it has no usable 5G signal (e.g. −156 dBm) */
 		const nrDead = val(nr.rsrp) && (parseFloat(nr.rsrp) <= -140 || (val(nr.snr) && parseFloat(nr.snr) <= -20));
-		const techs = (g['access-technologies'] || []).filter(t => !(nrDead && t === '5gnr'));
+		const techs = (g['access-technologies'] || []).map(mmVal).filter(t => t && !(nrDead && t === '5gnr'));
 		const bearer = m.bearer && m.bearer.bearer;
 		const ip4 = bearer && bearer['ipv4-config'] && bearer['ipv4-config'].address;
-		status.replaceChildren(h('div', { class: 'group' }, h('dl', { class: 'kv' },
-			h('dt', 'Carrier'), h('dd', op['operator-name'] || '—'),
-			h('dt', 'State'), h('dd', g.state === 'connected' ? 'Connected' : (g.state || '—')),
-			h('dt', 'Network'), h('dd', techName(techs) + (nrDead ? ' (5G not reachable now)' : '')),
-			h('dt', 'Signal'), h('dd', Data.signalBars(q >= 75 ? -50 : q >= 50 ? -60 : q >= 25 ? -70 : q ? -80 : 0), ` ${q}%`),
-			val(nr.rsrp) ? (nrDead ? [h('dt', '5G signal'), h('dd', 'None right now (using LTE)')] : [h('dt', '5G signal'), h('dd', `${num(nr.rsrp)} dBm`), h('dt', '5G quality'), h('dd', [val(nr.rsrq) ? `RSRQ ${num(nr.rsrq)} dB` : null, val(nr.snr) ? `SINR ${num(nr.snr)} dB` : null].filter(Boolean).join(' · ') || '—')]) : null,
-			val(lte.rsrp) ? [h('dt', 'LTE signal'), h('dd', `${num(lte.rsrp)} dBm`), h('dt', 'LTE quality'), h('dd', [val(lte.rsrq) ? `RSRQ ${num(lte.rsrq)} dB` : null, val(lte.snr) ? `SINR ${num(lte.snr)} dB` : null].filter(Boolean).join(' · ') || '—')] : null,
-			h('dt', 'Registration'), h('dd', ({ home: 'Home network', roaming: 'Roaming', searching: 'Searching…', denied: 'Refused by the carrier', idle: 'Not registered' })[op['registration-state']] || op['registration-state'] || '—'),
-			ip4 ? [h('dt', 'Mobile address'), h('dd', ip4)] : null,
-			h('dt', 'IMEI'), h('dd', h('a', { href: '#', onclick: e => { e.preventDefault(); showIds = !showIds; e.target.textContent = showIds ? (op.imei || '—') : 'Show'; } }, showIds ? (op.imei || '—') : 'Show')),
-			h('dt', 'Model'), h('dd', `${g.manufacturer || ''} ${g.model || ''}`.trim() || '—'))),
-			hint('RSRP above −90 dBm is good, below −110 dBm is weak. Moving the router near a window often helps.'),
+		/* what the modem is doing, in plain words (with the reason netifd gave, if it gave up) */
+		const ifs = await Data.interfaces().catch(() => []);
+		const errs = [].concat(...ifs.filter(i => Data.isModemProto(i.proto)).map(i => (i.errors || []).map(e => e.code)));
+		const P = modemPlain(mm, errs), lock = mmBandLock(g);
+		const model = [mmVal(g.manufacturer), mmVal(g.model)].filter((x, i) => x && !(i === 0 && /^generic$/i.test(x))).join(' ');
+		const top = [];
+		if (P.detail) top.push(note(P.detail, P.level === 'bad' ? 'bad' : 'warn'));
+		if (P.slot) {
+			const sb = btn(`Use SIM slot ${P.slot}`, () => busy(sb, async () => {
+				const r = await App.rpc('home-ui', 'modem_extra', { action: 'sim_slot', slot: P.slot });
+				if (r && r.error) throw new Error(r.error);
+				App.toast('Switching… the modem restarts and needs about a minute');
+			}), 'small');
+			top.push(h('div', { class: 'btn-row' }, sb));
+		}
+		status.replaceChildren(...top, h('div', { class: 'group' }, h('dl', { class: 'kv' },
+			h('dt', 'Carrier'), h('dd', mmVal(op['operator-name']) || '—'),
+			h('dt', 'State'), h('dd', P.level === 'bad' || P.level === 'warn' ? { class: P.level === 'bad' ? 'bad-text' : 'warn-text' } : null, P.state),
+			P.online ? [h('dt', 'Network'), h('dd', techName(techs) + (nrDead ? ' (5G not reachable now)' : '')),
+				h('dt', 'Signal'), h('dd', q ? [Data.signalBars(q >= 75 ? -50 : q >= 50 ? -60 : q >= 25 ? -70 : -80), ` ${q}%`] : '—')] : null,
+			P.online && val(nr.rsrp) ? (nrDead ? [h('dt', '5G signal'), h('dd', 'None right now (using LTE)')] : [h('dt', '5G signal'), h('dd', `${num(nr.rsrp)} dBm`), h('dt', '5G quality'), h('dd', [val(nr.rsrq) ? `RSRQ ${num(nr.rsrq)} dB` : null, val(nr.snr) ? `SINR ${num(nr.snr)} dB` : null].filter(Boolean).join(' · ') || '—')]) : null,
+			P.online && val(lte.rsrp) ? [h('dt', 'LTE signal'), h('dd', `${num(lte.rsrp)} dBm`), h('dt', 'LTE quality'), h('dd', [val(lte.rsrq) ? `RSRQ ${num(lte.rsrq)} dB` : null, val(lte.snr) ? `SINR ${num(lte.snr)} dB` : null].filter(Boolean).join(' · ') || '—')] : null,
+			P.online ? [h('dt', 'Registration'), h('dd', ({ home: 'Home network', roaming: 'Roaming', searching: 'Searching…', denied: 'Refused by the carrier', idle: 'Not registered', unknown: 'Not registered' })[mmVal(op['registration-state'])] || mmVal(op['registration-state']) || '—')] : null,
+			lock ? [h('dt', 'Bands'), h('dd', `Locked to ${lock}`)] : null,
+			P.online && ip4 ? [h('dt', 'Mobile address'), h('dd', ip4)] : null,
+			h('dt', 'IMEI'), h('dd', h('a', { href: '#', onclick: e => { e.preventDefault(); showIds = !showIds; e.target.textContent = showIds ? (mmVal(op.imei) || '—') : 'Show'; } }, showIds ? (mmVal(op.imei) || '—') : 'Show')),
+			h('dt', 'Model'), h('dd', model || '—'))),
+			P.online ? hint('RSRP above −90 dBm is good, below −110 dBm is weak. Moving the router near a window often helps.') : null,
 			h('div', { class: 'btn-row' }, restartMM()));
 	}
 	/* status from a modem add-on (format in ADDONS.md) */

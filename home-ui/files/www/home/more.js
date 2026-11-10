@@ -52,7 +52,7 @@ const More = (() => {
 				row({ icon: 'services', label: 'Services & schedules', sub: 'Start, stop, run at boot, scheduled tasks', href: '#/more/services' }),
 				row({ icon: 'package', label: 'Packages', sub: 'Installed apps, find and install, updates', href: '#/more/packages' }),
 				row({ icon: 'log', label: 'System log', sub: 'Recent messages from the router', onClick: () => openLog() }),
-				row({ icon: 'system', label: 'Advanced settings (LuCI)', sub: 'Every option, for experts', href: '/cgi-bin/luci/', target: '_blank' }))
+				(App.info.luci ? row({ icon: 'system', label: 'Advanced settings (LuCI)', sub: 'Every option, for experts', href: '/cgi-bin/luci/', target: '_blank' }) : null))
 		);
 	}
 

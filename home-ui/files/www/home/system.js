@@ -51,7 +51,7 @@ App.register('system', {
 				row({ icon: 'trash', label: 'Reset to factory settings', danger: true, onClick: factory })),
 			sectionTitle('More'),
 			group(
-				row({ icon: 'system', label: 'Advanced settings (LuCI)', sub: 'Every option, for experts', href: '/cgi-bin/luci/', target: '_blank' }),
+				(App.info.luci ? row({ icon: 'system', label: 'Advanced settings (LuCI)', sub: 'Every option, for experts', href: '/cgi-bin/luci/', target: '_blank' }) : null),
 				row({ icon: 'globe', label: 'Appearance', value: themeName(), onClick: openTheme }),
 				App.pwa.standalone() ? null : row({ icon: 'phone', label: 'Install as an app', sub: 'Open Router Home from its own icon', onClick: openInstall }),
 				row({ icon: 'user', label: 'Sign out', onClick: () => App.logout() })),

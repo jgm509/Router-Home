@@ -548,3 +548,7 @@ a.card.tiles { display: grid; }
 	.tile .ic svg { width: 19px; height: 19px; }
 	.tile .v { font-size: 15px; white-space: normal; line-height: 1.2; }
 }
+
+/* a state that needs attention, in a label/value list */
+.kv dd.bad-text { color: var(--offline); font-weight: 600; }
+.kv dd.warn-text { color: var(--warn); font-weight: 600; }
