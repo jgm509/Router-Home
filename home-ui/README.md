@@ -39,7 +39,7 @@ Since 3.0 the layout follows the card style of the YALA app: a bottom bar with *
 On the router, over SSH (`ssh root@192.168.1.1`):
 
 ```
-wget -O- https://github.com/jgm509/router-home/releases/latest/download/install.sh | sh
+wget -O- https://raw.githubusercontent.com/jgm509/router-home/main/home-ui/install.sh | sh
 ```
 
 It installs what Router Home needs (with apk or opkg), downloads the latest release and installs it. Run it again to update; your settings are kept. Then open `http://192.168.1.1/home` and sign in with the router's root password.

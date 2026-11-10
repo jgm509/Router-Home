@@ -1,7 +1,7 @@
 #!/bin/sh
 # Router Home installer: installs or updates Router Home on an OpenWrt router.
 #
-#   wget -O- https://github.com/jgm509/router-home/releases/latest/download/install.sh | sh
+#   wget -O- https://raw.githubusercontent.com/jgm509/router-home/main/home-ui/install.sh | sh
 #
 # or, with a home-ui.tar.gz you already copied to the router:
 #
@@ -10,7 +10,8 @@
 # Settings are kept on an update. Then open http://<router>/home and sign in
 # with the router's root password.
 
-URL=${HOME_UI_URL:-https://github.com/jgm509/router-home/releases/latest/download/home-ui.tar.gz}
+REPO=${HOME_UI_REPO:-jgm509/router-home}
+URL=$HOME_UI_URL	# a direct link to a home-ui.tar.gz, instead of the latest release
 TMP=/tmp/home-ui-install
 # The Router Home release key (public half; tools/make-key.sh writes it here).
 # A downloaded release must carry a signature made with it.
@@ -18,6 +19,16 @@ KEY='RWTOoFjNJn+QW24Rfhp2T5Xl6Wr/tz6n057P49tkvdQ0Bx/R+R6ng6xL'
 DEPS="rpcd rpcd-mod-file rpcd-mod-iwinfo rpcd-mod-luci rpcd-mod-ucode uhttpd uhttpd-mod-ubus cgi-io jsonfilter luci-base usign"
 
 say() { printf '%s\n' "$*"; }
+# get <url> <file> [json]: curl if there is one, else OpenWrt's wget
+get() {
+	local acc="application/octet-stream"
+	[ "$3" = json ] && acc="application/vnd.github+json"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL -m 300 -A "RouterHome-installer" -H "Accept: $acc" -o "$2" "$1"
+	else
+		wget -q -T 30 -U "RouterHome-installer" --header "Accept: $acc" -O "$2" "$1"
+	fi
+}
 die() { printf 'Router Home: %s\n' "$*" >&2; rm -rf "$TMP"; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "run this as root (log in to the router with ssh root@192.168.1.1)."
@@ -50,9 +61,21 @@ if [ -n "$1" ]; then
 	cp "$1" "$TMP/home-ui.tar.gz"
 else
 	say "Downloading Router Home…"
-	wget -q -O "$TMP/home-ui.tar.gz" "$URL" || die "the download failed (is the router online? does it have HTTPS support: ca-bundle and libustream?)."
+	if [ -z "$URL" ]; then
+		# Through GitHub's API: OpenWrt's wget stalls on the github.com web pages
+		# (a header line longer than its 4 KB buffer), the API is fine.
+		get "https://api.github.com/repos/$REPO/releases/latest" "$TMP/release.json" json ||
+			die "could not reach GitHub (is the router online? does it have HTTPS support: ca-bundle and libustream?)."
+		URL=$(jsonfilter -i "$TMP/release.json" -e '@.assets[@.name="home-ui.tar.gz"].url' 2>/dev/null)
+		SIGURL=$(jsonfilter -i "$TMP/release.json" -e '@.assets[@.name="home-ui.tar.gz.sig"].url' 2>/dev/null)
+		[ -n "$URL" ] || die "the latest release has no home-ui.tar.gz."
+	else
+		SIGURL="$URL.sig"
+	fi
+	get "$URL" "$TMP/home-ui.tar.gz" || die "the download failed (is the router online?)."
 	if [ -n "$KEY" ]; then
-		wget -q -O "$TMP/home-ui.tar.gz.sig" "$URL.sig" || die "the signature download failed (home-ui.tar.gz.sig)."
+		[ -n "$SIGURL" ] || die "the latest release isn't signed (no home-ui.tar.gz.sig): not installed."
+		get "$SIGURL" "$TMP/home-ui.tar.gz.sig" || die "the signature download failed (home-ui.tar.gz.sig)."
 		printf 'untrusted comment: Router Home release key\n%s\n' "$KEY" > "$TMP/release.pub"
 		usign -V -q -m "$TMP/home-ui.tar.gz" -p "$TMP/release.pub" -x "$TMP/home-ui.tar.gz.sig" ||
 			die "the download isn't signed with the Router Home release key: not installed."

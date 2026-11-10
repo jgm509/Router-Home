@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=home-ui
-PKG_VERSION:=3.2.3
+PKG_VERSION:=3.2.4
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Router Home contributors
