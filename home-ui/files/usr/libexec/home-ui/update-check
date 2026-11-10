@@ -33,7 +33,22 @@ newer() {
 		for (i = 1; i <= k; i++) { x = a[i] + 0; y = b[i] + 0; if (x > y) { print 1; exit } if (x < y) { print 0; exit } }
 		print 0 }'
 }
-fetch() { wget -q -T 15 -U "RouterHome/$CUR" -O "$2" "$1" 2>/dev/null; }
+# Downloads go through GitHub's API (api.github.com), never the github.com web
+# pages: since November 2026 github.com sends a header line longer than 4 KB,
+# and OpenWrt's wget (uclient-fetch) stalls on any header line longer than its
+# 4 KB read buffer. The API answers a file request with a redirect to the file
+# itself, all with short headers. curl copes with either, so it is used when
+# installed.
+#   fetch <url> <file> [binary]   binary: ask the API for the file, not its JSON
+fetch() {
+	local acc="application/vnd.github+json"
+	[ "$3" = binary ] && acc="application/octet-stream"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL -m 120 -A "RouterHome/$CUR" -H "Accept: $acc" -o "$2" "$1" 2>/dev/null
+	else
+		wget -q -T 30 -U "RouterHome/$CUR" --header "Accept: $acc" -O "$2" "$1" 2>/dev/null
+	fi
+}
 fail() { json_init; json_add_string current "$CUR"; json_add_boolean enabled "$ENABLED"; json_add_string error "$1"; json_dump; exit 0; }
 
 case "$1" in
@@ -49,11 +64,11 @@ install)
 	fi
 	bad() { rm -f "$DL" "$DL.sig"; fail "$1"; }
 	rm -f "$DL" "$DL.sig"
-	fetch "$URL" "$DL" || bad "The download failed. Is the router online?"
+	fetch "$URL" "$DL" binary || bad "The download failed. Is the router online?"
 	[ "$(wc -c < "$DL")" -le $((8 * 1024 * 1024)) ] || bad "The download is too big for a Router Home update"
 	[ -z "$SUM" ] || [ "$(sha256sum "$DL" | cut -d' ' -f1)" = "$SUM" ] || bad "The download is damaged (its checksum doesn't match). Try again"
 	if [ -s "$KEY" ]; then
-		fetch "$SIG" "$DL.sig" || bad "The signature could not be downloaded. Try again"
+		fetch "$SIG" "$DL.sig" binary || bad "The signature could not be downloaded. Try again"
 		usign -V -q -m "$DL" -p "$KEY" -x "$DL.sig" 2>/dev/null ||
 			bad "This release is not signed with the Router Home release key, so it was not installed"
 	fi
@@ -84,9 +99,10 @@ json_add_string name "$(jsonfilter -i "$T" -e '@.name' 2>/dev/null)"
 json_add_string notes "$(jsonfilter -i "$T" -e '@.body' 2>/dev/null | head -c 4000)"
 json_add_string published "$(jsonfilter -i "$T" -e '@.published_at' 2>/dev/null | cut -c1-10)"
 json_add_string url "$(jsonfilter -i "$T" -e '@.html_url' 2>/dev/null)"
-json_add_string asset "$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz"].browser_download_url' 2>/dev/null)"
+# the files' API addresses ("url"), not their github.com links: see fetch()
+json_add_string asset "$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz"].url' 2>/dev/null)"
 json_add_string digest "$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz"].digest' 2>/dev/null)"
-SIGURL=$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz.sig"].browser_download_url' 2>/dev/null)
+SIGURL=$(jsonfilter -i "$T" -e '@.assets[@.name="home-ui.tar.gz.sig"].url' 2>/dev/null)
 json_add_string sig "$SIGURL"
 json_add_boolean signed "$([ -n "$SIGURL" ] && echo 1 || echo 0)"
 json_dump > "$CACHE.$$" && mv "$CACHE.$$" "$CACHE"
