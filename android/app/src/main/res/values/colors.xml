@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#ff0c1520</color>
+    <!-- Router Home's background, light and dark (values-night) -->
+    <color name="bg">#fff3f5f7</color>
     <color name="icon_bg">#ff0c1520</color>
 </resources>

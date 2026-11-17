@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cut">
+<title>SSH</title>
+<script src="theme.js"></script>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="xterm/xterm.css">
+<style>
+html, body { height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; }
+header { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.st { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); flex: none; box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 18%, transparent); }
+.st.connected { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 18%, transparent); }
+.st.ended { background: var(--offline); box-shadow: 0 0 0 4px color-mix(in srgb, var(--offline) 18%, transparent); }
+.who { flex: 1; min-width: 0; }
+.who .label { font-size: 15px; }
+.who .sub { font-size: 12.5px; }
+header .icon-btn { width: 36px; height: 36px; font-weight: 650; font-size: 14px; color: var(--ink); }
+#term { flex: 1; min-height: 0; padding: 6px 0 0 8px; background: var(--bg); }
+.keys { flex: none; display: flex; overflow-x: auto; gap: 6px; padding: 7px 8px calc(7px + env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--line); scrollbar-width: none; }
+.keys::-webkit-scrollbar { display: none; }
+.keys button { flex: none; min-width: 46px; height: 38px; padding: 0 12px; border: 0; border-radius: 99px; background: var(--surface-2); color: var(--ink); font: 600 14px/1 var(--mono); }
+.keys button.on { background: var(--accent); color: var(--accent-ink); }
+.sheet .group { margin-top: 4px; }
+.sheet .detail { margin: 0 2px; padding: 12px 14px; border-radius: 14px; background: var(--surface); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+	<span class="st" id="st"></span>
+	<span class="who"><span class="label" id="title">SSH</span><span class="sub" id="state">Connecting…</span></span>
+	<button class="btn small" id="again" type="button" hidden>Reconnect</button>
+	<button class="icon-btn" id="smaller" type="button" aria-label="Smaller text">A−</button>
+	<button class="icon-btn" id="bigger" type="button" aria-label="Bigger text">A+</button>
+</header>
+<div id="term"></div>
+<div class="keys" id="keys"></div>
+
+<script src="xterm/xterm.js"></script>
+<script src="xterm/addon-fit.js"></script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+function el(tag, attrs, ...kids) {
+	const e = document.createElement(tag);
+	for (const k in attrs || {}) {
+		if (k.startsWith('on')) e[k] = attrs[k];
+		else e.setAttribute(k, attrs[k]);
+	}
+	for (const c of kids) if (c != null) e.append(c);
+	return e;
+}
+let size = 14;
+try { size = parseInt(localStorage.getItem('term-size'), 10) || 14; } catch (e) { }
+
+/* the terminal in the theme's colors */
+function colors() {
+	const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
+	const light = document.documentElement.dataset.theme === 'light';
+	return { background: v('--bg'), foreground: v('--ink'), cursor: v('--accent'), cursorAccent: v('--bg'),
+		selectionBackground: light ? 'rgba(0, 0, 0, .18)' : 'rgba(255, 255, 255, .22)' };
+}
+const term = new Terminal({ fontFamily: 'ui-monospace, "Droid Sans Mono", monospace', fontSize: size, cursorBlink: true, scrollback: 5000, theme: colors() });
+window.onTheme = () => { term.options.theme = colors(); };
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open($('term'));
+fit.fit();
+const [name, who] = Term.title().split('\n');
+$('title').textContent = name;
+$('state').textContent = who;
+
+/* ---- keys the phone keyboard doesn't have ---- */
+let ctrl = false, ctrlBtn;
+const setCtrl = on => { ctrl = on; ctrlBtn.classList.toggle('on', on); };
+const arrow = k => (term.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b[') + k;
+const KEYS = [
+	['Esc', () => '\x1b'], ['Tab', () => '\t'], ['Ctrl', null],
+	['↑', () => arrow('A')], ['↓', () => arrow('B')], ['←', () => arrow('D')], ['→', () => arrow('C')],
+	['|', () => '|'], ['-', () => '-'], ['/', () => '/'], ['~', () => '~'],
+	['Home', () => '\x1b[H'], ['End', () => '\x1b[F'], ['PgUp', () => '\x1b[5~'], ['PgDn', () => '\x1b[6~'],
+	['Paste', () => { term.paste(Term.clipboard()); return ''; }]
+];
+for (const [label, val] of KEYS) {
+	const b = el('button', { type: 'button' }, label);
+	// act on touch without taking the focus, so the keyboard stays open
+	b.addEventListener('pointerdown', e => {
+		e.preventDefault();
+		if (!val) setCtrl(!ctrl);
+		else send(val());
+		term.focus();
+	});
+	if (!val) ctrlBtn = b;
+	$('keys').append(b);
+}
+function send(d) {
+	if (!d) return;
+	if (ctrl && d.length === 1) {
+		const c = d.toUpperCase().charCodeAt(0);
+		if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64);
+		else if (d === ' ') d = '\x00';
+		setCtrl(false);
+	}
+	Term.input(d);
+}
+term.onData(send);
+
+/* ---- questions from the app, as Router Home sheets ---- */
+let openSheet = null;
+function sheet(kids, cancel) {
+	const back = el('div', { class: 'sheet-backdrop', onclick: e => { if (e.target === back) cancel(); } },
+		el('div', { class: 'sheet' }, el('div', { class: 'grabber' }), ...kids));
+	document.body.append(back);
+	openSheet = { back, cancel };
+	return () => { back.remove(); openSheet = null; setTimeout(() => term.focus(), 50); };
+}
+window.askPassword = o => {
+	let done = false;
+	const pw = el('input', { type: 'password', autocomplete: 'off' });
+	const keep = el('input', { type: 'checkbox' });
+	keep.checked = true;
+	const answer = v => { if (done) return; done = true; close(); Term.answer(JSON.stringify(v)); };
+	const ok = () => answer({ pw: pw.value, remember: keep.checked });
+	pw.onkeydown = e => { if (e.key === 'Enter') ok(); };
+	const close = sheet([
+		el('h2', {}, o.title), el('p', {}, 'Password for ' + o.user + '.'),
+		el('div', { class: 'group' },
+			el('label', { class: 'field' }, el('span', {}, 'Password'), pw),
+			el('label', { class: 'check' }, keep, 'Remember for this router')),
+		el('div', { class: 'actions' },
+			el('button', { class: 'btn secondary', type: 'button', onclick: () => answer(null) }, 'Cancel'),
+			el('button', { class: 'btn', type: 'button', onclick: ok }, 'Connect'))
+	], () => answer(null));
+	setTimeout(() => pw.focus(), 50);
+};
+window.askYesNo = o => {
+	let done = false;
+	const answer = v => { if (done) return; done = true; close(); Term.answer(v ? 'true' : 'false'); };
+	const close = sheet([
+		el('h2', {}, o.title), el('p', {}, o.text),
+		o.detail ? el('div', { class: 'detail mono' }, o.detail) : null,
+		el('div', { class: 'actions' },
+			el('button', { class: 'btn secondary', type: 'button', onclick: () => answer(false) }, 'Cancel'),
+			el('button', { class: 'btn' + (o.danger ? ' danger' : ''), type: 'button', onclick: () => answer(true) }, o.yes))
+	], () => answer(false));
+};
+window.back = () => { if (openSheet) { openSheet.cancel(); return true; } return false; };
+
+/* ---- called by the app ---- */
+window.recv = b64 => {
+	const s = atob(b64);
+	const u = new Uint8Array(s.length);
+	for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+	term.write(u);
+};
+window.say = text => term.write(text);
+window.state = s => {
+	$('st').className = 'st ' + s;
+	$('state').textContent = s === 'connected' ? who : s === 'ended' ? 'Not connected' : 'Connecting…';
+	$('again').hidden = s !== 'ended';
+};
+
+/* ---- size ---- */
+term.onResize(({ cols, rows }) => Term.resize(cols, rows));
+new ResizeObserver(() => { try { fit.fit(); } catch (e) { } }).observe($('term'));
+const setSize = n => {
+	size = Math.max(9, Math.min(24, n));
+	term.options.fontSize = size;
+	try { localStorage.setItem('term-size', size); } catch (e) { }
+	fit.fit();
+};
+$('smaller').onclick = () => setSize(size - 1);
+$('bigger').onclick = () => setSize(size + 1);
+$('again').onclick = () => { term.write('\r\n'); Term.reconnect(); };
+
+term.focus();
+Term.ready(term.cols, term.rows);
+</script>
+</body>
+</html>

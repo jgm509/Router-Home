@@ -1,0 +1,12 @@
+# private: never commit
+keystore.properties
+*.keystore
+*.jks
+local.properties
+# build output
+.gradle/
+build/
+app/build/
+*.apk
+# downloaded at build time
+app/src/main/assets/xterm/

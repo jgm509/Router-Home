@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cut">
+<title>Router Home</title>
+<script src="theme.js"></script>
+<link rel="stylesheet" href="app.css">
+<style>
+.center { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+.box { width: 100%; max-width: 380px; }
+.box h1 { font-size: 28px; line-height: 1.15; font-weight: 720; letter-spacing: -.02em; margin: 0 0 6px; }
+.box p { color: var(--muted); margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<div class="center">
+	<div class="box">
+		<div class="lamp warn"></div>
+		<h1 id="title">Can't reach your router</h1>
+		<p id="text"></p>
+		<p class="hint">Make sure your phone is on the router's WiFi or cable network.</p>
+		<div class="btn-col">
+			<button class="btn wide" id="retry" type="button">Try again</button>
+			<button class="btn wide secondary" id="list" type="button">All routers</button>
+		</div>
+	</div>
+</div>
+<script>
+'use strict';
+const [name, addr] = decodeURIComponent(location.hash.slice(1)).split('\n');
+document.getElementById('title').textContent = "Can't reach " + (name || 'your router');
+document.getElementById('text').textContent = 'No answer from ' + (addr || 'the router') + '.';
+document.getElementById('retry').onclick = () => RouterHomeApp.retry();
+document.getElementById('list').onclick = () => RouterHomeApp.routers();
+</script>
+</body>
+</html>

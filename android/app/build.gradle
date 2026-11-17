@@ -1,0 +1,79 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The signing key stays private: keystore.properties and the keystore are
+// never committed. Without them only a debug build can be made.
+def ksFile = rootProject.file('keystore.properties')
+def ks = new Properties()
+if (ksFile.exists()) ksFile.withInputStream { ks.load(it) }
+
+android {
+    namespace 'app.routerhome'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'app.routerhome'
+        minSdk 29
+        targetSdk 34
+        versionCode 2
+        versionName '2.0.0'
+    }
+
+    signingConfigs {
+        release {
+            if (ksFile.exists()) {
+                storeFile rootProject.file(ks['storeFile'])
+                storePassword ks['storePassword']
+                keyAlias ks['keyAlias']
+                keyPassword ks['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // JSch has optional logging back ends that aren't on Android;
+            // shrinking would trip over them, and the app is small anyway
+            minifyEnabled false
+            if (ksFile.exists()) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // JSch and Bouncy Castle both carry these (Java-module and OSGi files
+    // Android doesn't use): leave them out instead of failing on duplicates
+    packaging {
+        resources {
+            excludes.add('META-INF/versions/9/module-info.class')
+            excludes.add('META-INF/versions/*/OSGI-INF/MANIFEST.MF')
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    // SSH client; Bouncy Castle gives it Ed25519 and Curve25519 on Android
+    implementation 'com.github.mwiede:jsch:0.2.16'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+}
+
+// The terminal (xterm.js) is downloaded once into the app's assets
+def xtermDir = file('src/main/assets/xterm')
+tasks.register('fetchXterm') {
+    outputs.dir xtermDir
+    onlyIf { !file("$xtermDir/xterm.js").exists() }
+    doLast {
+        xtermDir.mkdirs()
+        def cdn = 'https://cdn.jsdelivr.net/npm'
+        ant.get(src: "$cdn/@xterm/xterm@5.5.0/lib/xterm.js", dest: "$xtermDir/xterm.js")
+        ant.get(src: "$cdn/@xterm/xterm@5.5.0/css/xterm.css", dest: "$xtermDir/xterm.css")
+        ant.get(src: "$cdn/@xterm/addon-fit@0.10.0/lib/addon-fit.js", dest: "$xtermDir/addon-fit.js")
+        ant.get(src: "$cdn/@xterm/xterm@5.5.0/LICENSE", dest: "$xtermDir/LICENSE")
+    }
+}
+tasks.named('preBuild') { dependsOn 'fetchXterm' }

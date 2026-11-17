@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cut">
+<title>Router Home</title>
+<script src="theme.js"></script>
+<link rel="stylesheet" href="app.css">
+<style>
+.routers .row { padding-right: 6px; }
+.add-row .label { color: var(--accent); }
+.key-row .main .sub { white-space: normal; }
+</style>
+</head>
+<body>
+<main>
+	<section id="listView" hidden>
+		<h1 class="page-title">Your routers</h1>
+		<p class="lead">Tap a router to open Router Home.</p>
+		<div class="group routers" id="list"></div>
+		<div class="group" style="margin-top:12px">
+			<button class="row add-row" id="add" type="button"><span class="ic" data-icon="plus"></span><span class="main"><span class="label">Add a router</span></span></button>
+		</div>
+	</section>
+
+	<section id="formView" hidden>
+		<h1 class="page-title" id="formTitle">Add a router</h1>
+		<p class="lead" id="formText">The address you use to open its settings, and the user and password you sign in with.</p>
+		<div class="group">
+			<label class="field"><span>Name</span><input type="text" id="name" placeholder="Living room" autocomplete="off"></label>
+			<label class="field"><span>Address</span><input type="text" id="addr" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="192.168.1.1"></label>
+		</div>
+		<h2 class="section-title">Sign-in</h2>
+		<div class="group">
+			<label class="field"><span>User</span><input type="text" id="user" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="root"></label>
+			<label class="field"><span>Password</span><input type="password" id="pw" autocomplete="off"></label>
+			<label class="check" id="forgetRow" hidden><input type="checkbox" id="forget"> Forget the saved password</label>
+		</div>
+		<p class="hint">Saved encrypted on this phone, and used to sign in to Router Home and SSH.</p>
+		<h2 class="section-title">SSH</h2>
+		<div class="group">
+			<label class="field"><span>Port</span><input type="number" id="port" min="1" max="65535" placeholder="22"></label>
+			<div class="row key-row" id="keyRow" hidden>
+				<span class="ic" data-icon="key"></span>
+				<span class="main"><span class="label">Router's SSH key</span><span class="sub mono" id="key"></span></span>
+				<button class="btn small outline" id="forgetKey" type="button">Forget</button>
+			</div>
+		</div>
+		<div class="err" id="err"></div>
+		<div class="btn-col">
+			<button class="btn wide" id="save" type="button">Save</button>
+			<button class="btn wide secondary" id="cancel" type="button">Cancel</button>
+		</div>
+		<div class="group" id="delGroup" style="margin-top:24px">
+			<button class="row danger" id="del" type="button"><span class="ic" data-icon="trash"></span><span class="main"><span class="label">Delete this router</span></span></button>
+		</div>
+	</section>
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const ICONS = {
+	router: 'M3 13h18v7H3zM7 16.5h.01M11 16.5h.01M8 9a6 6 0 0 1 8 0M5.5 6.5a10 10 0 0 1 13 0',
+	term: 'M3 5h18v14H3zM7 9.5l3 2.5-3 2.5M12.5 15h4',
+	edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
+	plus: 'M12 5v14M5 12h14',
+	key: 'M14 3a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM10.5 11.5L3 19v2h3v-2h2v-2h2l1.5-1.5',
+	trash: 'M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14',
+	chev: 'M9 6l6 6-6 6'
+};
+function icon(name, cls) {
+	const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+	s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('fill', 'none'); s.setAttribute('stroke', 'currentColor');
+	s.setAttribute('stroke-width', '1.8'); s.setAttribute('stroke-linecap', 'round'); s.setAttribute('stroke-linejoin', 'round');
+	if (cls) s.setAttribute('class', cls);
+	const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+	p.setAttribute('d', ICONS[name]);
+	s.append(p);
+	return s;
+}
+function el(tag, attrs, ...kids) {
+	const e = document.createElement(tag);
+	for (const k in attrs || {}) {
+		if (k.startsWith('on')) e[k] = attrs[k];
+		else e.setAttribute(k, attrs[k]);
+	}
+	for (const c of kids) if (c != null) e.append(c);
+	return e;
+}
+document.querySelectorAll('[data-icon]').forEach(e => e.append(icon(e.dataset.icon)));
+
+let routers = [];
+let editing = null;		// the router being edited, or {} when adding
+
+function load() {
+	try { routers = JSON.parse(RH.list()) || []; } catch (e) { routers = []; }
+}
+
+function showList() {
+	editing = null;
+	$('formView').hidden = true;
+	$('listView').hidden = false;
+	$('list').replaceChildren(...routers.map(r => el('div', { class: 'row' },
+		el('button', { class: 'tap', type: 'button', onclick: () => RH.open(r.id) },
+			el('span', { class: 'ic' }, icon('router')),
+			el('span', { class: 'main' },
+				el('span', { class: 'label' }, r.name),
+				el('span', { class: 'sub' }, r.user + ' @ ' + r.addr + (r.hasPassword ? '' : ' · password not saved')))),
+		el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'SSH', title: 'SSH', onclick: () => RH.ssh(r.id) }, icon('term')),
+		el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Edit', title: 'Edit', onclick: () => showForm(r) }, icon('edit')))));
+	window.scrollTo(0, 0);
+}
+
+function showForm(r) {
+	editing = r || {};
+	const adding = !r;
+	$('listView').hidden = true;
+	$('formView').hidden = false;
+	$('formTitle').textContent = adding ? (routers.length ? 'Add a router' : 'Add your router') : r.name;
+	$('formText').hidden = !adding;
+	$('name').value = adding ? '' : r.name;
+	let old = '';
+	if (adding && !routers.length) try { old = localStorage.getItem('router-address') || ''; } catch (e) { }
+	$('addr').value = adding ? (old || '192.168.1.1') : r.addr;
+	$('user').value = adding ? 'root' : r.user;
+	$('pw').value = '';
+	$('pw').placeholder = !adding && r.hasPassword ? 'Saved (leave empty to keep it)' : '';
+	$('forget').checked = false;
+	$('forgetRow').hidden = adding || !r.hasPassword;
+	$('port').value = adding || r.sshPort === 22 ? '' : r.sshPort;
+	$('keyRow').hidden = adding || !r.hostKey;
+	$('key').textContent = adding ? '' : (r.hostKey || '');
+	$('delGroup').hidden = adding;
+	$('cancel').hidden = adding && !routers.length;
+	$('err').textContent = '';
+	window.scrollTo(0, 0);
+	if (adding) $('name').focus();
+}
+
+function save() {
+	const addr = $('addr').value.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/.*$/, '');
+	if (!addr) { $('err').textContent = 'Enter the router\'s address.'; $('addr').focus(); return; }
+	const port = $('port').value === '' ? 22 : parseInt($('port').value, 10);
+	if (!(port >= 1 && port <= 65535)) { $('err').textContent = 'The SSH port is a number from 1 to 65535.'; return; }
+	const r = {
+		id: editing.id || '', name: $('name').value.trim() || addr, addr,
+		user: $('user').value.trim() || 'root', sshPort: port,
+		password: $('pw').value, forgetPassword: $('forget').checked
+	};
+	const id = RH.save(JSON.stringify(r));
+	$('pw').value = '';
+	if (!id) { $('err').textContent = 'Could not save the router.'; return; }
+	const added = !editing.id;
+	load();
+	showList();
+	if (added) RH.open(id);
+}
+
+/* a bottom sheet like Router Home's: resolves true or false */
+let closeSheet = null;
+function ask(title, text, yes, danger) {
+	return new Promise(done => {
+		const end = v => { back.remove(); closeSheet = null; done(v); };
+		const back = el('div', { class: 'sheet-backdrop', onclick: e => { if (e.target === back) end(false); } },
+			el('div', { class: 'sheet' },
+				el('div', { class: 'grabber' }),
+				el('h2', {}, title), el('p', {}, text),
+				el('div', { class: 'actions' },
+					el('button', { class: 'btn secondary', type: 'button', onclick: () => end(false) }, 'Cancel'),
+					el('button', { class: 'btn' + (danger ? ' danger' : ''), type: 'button', onclick: () => end(true) }, yes))));
+		closeSheet = () => end(false);
+		document.body.append(back);
+	});
+}
+
+$('add').onclick = () => showForm(null);
+$('save').onclick = save;
+$('cancel').onclick = showList;
+$('pw').onkeydown = e => { if (e.key === 'Enter') save(); };
+$('forgetKey').onclick = async () => {
+	if (!await ask('Forget the SSH key?', 'The next SSH connection shows the router\'s key and asks you to trust it again.', 'Forget key')) return;
+	RH.forgetKey(editing.id);
+	load();
+	editing = routers.find(r => r.id === editing.id) || editing;
+	$('keyRow').hidden = true;
+};
+$('del').onclick = async () => {
+	const r = editing;
+	if (!await ask('Delete ' + r.name + '?', 'Its saved password and SSH key are deleted from this phone too. Nothing changes on the router.', 'Delete', true)) return;
+	RH.remove(r.id);
+	load();
+	routers.length ? showList() : showForm(null);
+};
+
+/* called by the app */
+window.refresh = () => {
+	load();
+	if (!editing) routers.length ? showList() : showForm(null);
+};
+window.back = () => {
+	if (closeSheet) { closeSheet(); return true; }
+	if (editing && routers.length) { showList(); return true; }
+	return false;
+};
+
+load();
+routers.length ? showList() : showForm(null);
+</script>
+</body>
+</html>
