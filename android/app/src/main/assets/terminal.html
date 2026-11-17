@@ -68,6 +68,9 @@ const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open($('term'));
 fit.fit();
+// no autocorrect or capitals from the keyboard
+const ta = document.querySelector('.xterm-helper-textarea');
+if (ta) for (const [k, v] of [['autocorrect', 'off'], ['autocapitalize', 'off'], ['autocomplete', 'off'], ['spellcheck', 'false']]) ta.setAttribute(k, v);
 const [name, who] = Term.title().split('\n');
 $('title').textContent = name;
 $('state').textContent = who;
@@ -97,10 +100,13 @@ for (const [label, val] of KEYS) {
 }
 function send(d) {
 	if (!d) return;
-	if (ctrl && d.length === 1) {
-		const c = d.toUpperCase().charCodeAt(0);
-		if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64);
-		else if (d === ' ') d = '\x00';
+	// Ctrl applies to the next key; a keyboard may still send a few letters
+	// at once, so it changes the first one
+	if (ctrl && d.startsWith('\x1b')) setCtrl(false);
+	else if (ctrl) {
+		const c = d[0].toUpperCase().charCodeAt(0);
+		if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64) + d.slice(1);
+		else if (d[0] === ' ') d = '\x00' + d.slice(1);
 		setCtrl(false);
 	}
 	Term.input(d);

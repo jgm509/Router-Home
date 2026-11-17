@@ -5,7 +5,10 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.InputType;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
@@ -73,7 +76,7 @@ public class TerminalActivity extends Activity {
 		setTitle(name + " (SSH)");
 		getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-		web = Web.make(this);
+		web = Web.make(this, new TermView(this));
 		web.addJavascriptInterface(new Term(), "Term");
 		web.setWebViewClient(new WebViewClient() {
 			@Override
@@ -95,6 +98,26 @@ public class TerminalActivity extends Activity {
 		io.shutdown();
 		if (web != null) web.destroy();
 		super.onDestroy();
+	}
+
+	/* The phone keyboard as a terminal keyboard: no suggestions, no
+	 * autocorrect, and every key sent at once. Keyboards otherwise hold a
+	 * word being typed ("composing") and only send it at the end, which
+	 * breaks Ctrl+key and moves a floating letter around the screen. */
+	private static final class TermView extends WebView {
+		TermView(android.content.Context c) {
+			super(c);
+		}
+
+		@Override
+		public InputConnection onCreateInputConnection(EditorInfo out) {
+			InputConnection ic = super.onCreateInputConnection(out);
+			out.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+					| InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+			out.imeOptions |= EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+					| EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+			return ic;
+		}
 	}
 
 	/* ---------------- talking to the page ---------------- */

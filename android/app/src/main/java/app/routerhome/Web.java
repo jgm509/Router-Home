@@ -21,7 +21,10 @@ final class Web {
 	private Web() { }
 
 	static WebView make(Activity a) {
-		WebView w = new WebView(a);
+		return make(a, new WebView(a));
+	}
+
+	static WebView make(Activity a, WebView w) {
 		w.setBackgroundColor(Theme.background(a));
 		Theme.bars(a);
 		w.addJavascriptInterface(new Theme.Bridge(a), "AppTheme");

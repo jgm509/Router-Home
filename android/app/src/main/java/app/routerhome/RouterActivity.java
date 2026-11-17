@@ -45,7 +45,7 @@ public class RouterActivity extends Activity {
 	private Routers store;
 	private String id, name, addr, user, home;
 	private ValueCallback<Uri[]> upload;
-	private ScriptHandler sidScript;
+	private ScriptHandler pageScript;
 	private boolean clearHistory;
 
 	@Override
@@ -86,13 +86,13 @@ public class RouterActivity extends Activity {
 
 	private void signInAndLoad() {
 		String pw = store.password(id);
-		if (pw == null) { load(); return; }
+		if (pw == null) { pageScripts(null); load(); return; }
 		new Thread(() -> {
 			String sid = login(pw);
 			runOnUiThread(() -> {
 				if (isFinishing() || isDestroyed()) return;
-				if (sid != null && !sid.isEmpty()) giveSession(sid);
-				else if (sid != null)
+				pageScripts(sid != null && !sid.isEmpty() ? sid : null);
+				if (sid != null && sid.isEmpty())
 					Toast.makeText(this, "The saved password didn't work. Sign in, then update it in the router list.", Toast.LENGTH_LONG).show();
 				load();
 			});
@@ -143,18 +143,27 @@ public class RouterActivity extends Activity {
 		}
 	}
 
-	/* The page keeps its session in sessionStorage "home-sid". A script that
-	 * runs before the page's own scripts puts ours there, once: if the user
-	 * signs out, they stay signed out. */
-	private void giveSession(String sid) {
+	/* Scripts that run in Router Home's pages before their own scripts:
+	 * - signing out (Router Home ends its session with ubus session.destroy)
+	 *   goes back to the router list
+	 * - with a fresh session from the saved password, the page gets it in
+	 *   sessionStorage "home-sid", once: after signing out it isn't reused */
+	private static final String SIGNOUT_HOOK = "(function(){var f=window.fetch;window.fetch=function(u,o){"
+			+ "try{if(o&&typeof o.body==='string'&&o.body.indexOf('\"session\",\"destroy\"')>0&&window.RouterHomeApp)"
+			+ "setTimeout(function(){RouterHomeApp.signedOut()},300)}catch(e){}return f.apply(this,arguments)}})();";
+
+	private void pageScripts(String sid) {
 		if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return;
-		if (sidScript != null) sidScript.remove();
-		String js = "try{if(location.pathname.indexOf('/home')===0&&!sessionStorage.getItem('app-sid')){"
-				+ "sessionStorage.setItem('app-sid','1');sessionStorage.setItem('home-sid'," + Web.js(sid) + ")}}catch(e){}";
+		if (pageScript != null) pageScript.remove();
+		String js = "if(location.pathname.indexOf('/home')===0){" + SIGNOUT_HOOK;
+		if (sid != null)
+			js += "try{if(!sessionStorage.getItem('app-sid')){sessionStorage.setItem('app-sid','1');"
+					+ "sessionStorage.setItem('home-sid'," + Web.js(sid) + ")}}catch(e){}";
+		js += "}";
 		try {
-			sidScript = WebViewCompat.addDocumentStartJavaScript(web, js, Collections.singleton("http://" + addr));
+			pageScript = WebViewCompat.addDocumentStartJavaScript(web, js, Collections.singleton("http://" + addr));
 		} catch (IllegalArgumentException e) {
-			sidScript = null;	// an address the origin rules don't accept: sign in by hand
+			pageScript = null;	// an address the origin rules don't accept: sign in by hand
 		}
 	}
 
@@ -269,6 +278,12 @@ public class RouterActivity extends Activity {
 			} catch (Exception e) {
 				return false;
 			}
+		}
+
+		/** Signed out of Router Home: back to the router list. */
+		@JavascriptInterface
+		public void signedOut() {
+			runOnUiThread(RouterActivity.this::finish);
 		}
 
 		@JavascriptInterface

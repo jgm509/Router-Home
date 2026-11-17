@@ -3,7 +3,7 @@
 An Android app for Router Home. App id `app.routerhome`, Android 10 or newer.
 
 - **Router Home's look.** The app uses the theme and accent color you picked in Router Home (Settings → Appearance), and the bars around the screen match.
-- **Several routers.** Add each router with a name, its address, and the user and password you sign in with. Tap a router to open its Router Home, already signed in.
+- **Several routers.** Add each router with a name, its address, and the user and password you sign in with. Tap a router to open its Router Home, already signed in. Signing out takes you back to the router list.
 - **SSH.** Each router has an **SSH** button that opens a terminal on it. There's a key bar for Esc, Tab, Ctrl, the arrow keys and Paste.
 - **One SSH key per router.** The app remembers each router's SSH host key with the router itself, not with its address. Routers that share an address, like several at 192.168.1.1, don't conflict, and there's no known_hosts file to clean up. After a reflash, the app shows the new key once and asks whether to replace the old one.
 - **Deleting a router** also deletes its saved password and SSH key.
