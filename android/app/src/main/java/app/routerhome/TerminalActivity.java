@@ -1,6 +1,9 @@
 package app.routerhome;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.net.Uri;
@@ -9,6 +12,8 @@ import android.text.InputType;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputConnectionWrapper;
+import android.view.KeyEvent;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
@@ -75,6 +80,10 @@ public class TerminalActivity extends Activity {
 		port = r.optInt("sshPort", 22);
 		setTitle(name + " (SSH)");
 		getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+		// the "SSH connection open" notification, to come back to the terminal
+		if (Build.VERSION.SDK_INT >= 33
+				&& checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+			requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, 2);
 
 		web = Web.make(this, new TermView(this));
 		web.addJavascriptInterface(new Term(), "Term");
@@ -112,11 +121,42 @@ public class TerminalActivity extends Activity {
 		@Override
 		public InputConnection onCreateInputConnection(EditorInfo out) {
 			InputConnection ic = super.onCreateInputConnection(out);
+			if (ic == null) return null;
 			out.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
 					| InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
 			out.imeOptions |= EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI
 					| EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
-			return ic;
+			return new Keys(ic);
+		}
+	}
+
+	/* The keyboard deletes by removing text from the page's hidden input box.
+	 * Text that came from the router (a command brought back with ↑) isn't
+	 * in that box, so there was nothing to remove and Backspace did nothing.
+	 * Send every delete as a real Backspace key instead. */
+	private static final class Keys extends InputConnectionWrapper {
+		Keys(InputConnection target) {
+			super(target, true);
+		}
+
+		private boolean backspace(int n) {
+			for (int i = 0; i < n; i++) {
+				super.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL));
+				super.sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL));
+			}
+			return true;
+		}
+
+		@Override
+		public boolean deleteSurroundingText(int before, int after) {
+			if (before > 0 && after == 0) return backspace(before);
+			return super.deleteSurroundingText(before, after);
+		}
+
+		@Override
+		public boolean deleteSurroundingTextInCodePoints(int before, int after) {
+			if (before > 0 && after == 0) return backspace(before);
+			return super.deleteSurroundingTextInCodePoints(before, after);
 		}
 	}
 
@@ -290,6 +330,9 @@ public class TerminalActivity extends Activity {
 		ch.connect(10000);
 		shell = ch;
 		js("state('connected')");
+		// a foreground service while connected: without it Android freezes the
+		// app a few seconds after you switch away, and the connection drops
+		SshService.hold(getApplicationContext());
 		byte[] buf = new byte[16384];
 		try {
 			int n;
@@ -300,6 +343,8 @@ public class TerminalActivity extends Activity {
 			}
 		} catch (java.io.IOException ignored) {
 			// the connection dropped
+		} finally {
+			SshService.release(getApplicationContext());
 		}
 		if (closed) return;
 		out = null;

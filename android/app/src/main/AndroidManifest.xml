@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- keep an SSH connection open while you use other apps -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- allowBackup off: saved passwords are encrypted with a key that never
          leaves this phone, so a backup restored elsewhere couldn't use them -->
     <application
@@ -32,5 +36,13 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|density|fontScale|uiMode"
             android:windowSoftInputMode="adjustResize"/>
+        <service
+            android:name=".SshService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps an SSH terminal connection to the user's router open while the user switches to other apps"/>
+        </service>
     </application>
 </manifest>

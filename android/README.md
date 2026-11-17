@@ -4,7 +4,7 @@ An Android app for Router Home. App id `app.routerhome`, Android 10 or newer.
 
 - **Router Home's look.** The app uses the theme and accent color you picked in Router Home (Settings → Appearance), and the bars around the screen match.
 - **Several routers.** Add each router with a name, its address, and the user and password you sign in with. Tap a router to open its Router Home, already signed in. Signing out takes you back to the router list.
-- **SSH.** Each router has an **SSH** button that opens a terminal on it. There's a key bar for Esc, Tab, Ctrl, the arrow keys and Paste.
+- **SSH.** Each router has an **SSH** button that opens a terminal on it. There's a key bar for Esc, Tab, Ctrl, the arrow keys and Paste. While you're connected, an "SSH connection open" notification keeps the connection alive when you switch to other apps; tap it to come back.
 - **One SSH key per router.** The app remembers each router's SSH host key with the router itself, not with its address. Routers that share an address, like several at 192.168.1.1, don't conflict, and there's no known_hosts file to clean up. After a reflash, the app shows the new key once and asks whether to replace the old one.
 - **Deleting a router** also deletes its saved password and SSH key.
 
@@ -51,6 +51,7 @@ If you publish your own build, make your own key. Phones with the official app t
 | `RoutersActivity` + `assets/routers.html` | The router list and the add/edit form. Only this page can change the saved routers. |
 | `RouterActivity` | One router's Router Home in a web view. It signs in with the saved password, saves backups to Downloads, and handles file uploads. |
 | `TerminalActivity` + `assets/terminal.html` | The SSH terminal: [JSch](https://github.com/mwiede/jsch) for the connection and [xterm.js](https://xtermjs.org) for the screen. |
+| `SshService` | Keeps the app running (foreground service) while an SSH terminal is connected |
 | `HostKeys` | SSH host keys kept per router |
 | `Routers` | Storage: the router list, encrypted passwords and host keys |
 
