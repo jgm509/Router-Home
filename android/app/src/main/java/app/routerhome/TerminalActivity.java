@@ -577,6 +577,13 @@ public class TerminalActivity extends Activity {
 		tsession.setLink(null);
 		out = null;
 		shell = null;
+		// the router's shell ended by itself ("exit", Ctrl+D): back to the
+		// router list. A dropped connection has no exit status: stay, with
+		// Reconnect.
+		if (ch.getExitStatus() != -1) {
+			runOnUiThread(this::finish);
+			return;
+		}
 		print("\r\n[Connection closed]\r\n");
 		ended();
 	}

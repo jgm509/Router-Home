@@ -36,6 +36,10 @@ sh build.sh
 
 The first run installs anything that's missing: Java 21, and the Android SDK in `~/android-sdk`. It then asks where the signing key is. The result is `RouterHome.apk`.
 
+### Version
+
+Raise `appVersionCode` in `app/build.gradle` by one for each release. The version name follows it: 10 is 1.0, 11 is 1.1, 23 is 2.3.
+
 ### Signing
 
 A phone only installs an update if it's signed with the same key as the app already on it. Keep using `routerhome.keystore`. **Never commit the keystore or `keystore.properties`.** `.gitignore` already leaves them out.

@@ -35,7 +35,7 @@
             android:name=".TerminalActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|density|fontScale|uiMode"
-            android:windowSoftInputMode="adjustResize"/>
+            android:windowSoftInputMode="adjustResize|stateVisible"/>
         <service
             android:name=".SshService"
             android:exported="false"

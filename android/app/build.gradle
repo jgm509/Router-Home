@@ -4,6 +4,9 @@ plugins {
 
 // The signing key stays private: keystore.properties and the keystore are
 // never committed. Without them only a debug build can be made.
+// Raise this by one for each release.
+def appVersionCode = 10
+
 def ksFile = rootProject.file('keystore.properties')
 def ks = new Properties()
 if (ksFile.exists()) ksFile.withInputStream { ks.load(it) }
@@ -16,8 +19,9 @@ android {
         applicationId 'app.routerhome'
         minSdk 29
         targetSdk 34
-        versionCode 8
-        versionName '2.1.1'
+        // the version name follows the version code: 10 is 1.0, 11 is 1.1, 23 is 2.3
+        versionCode appVersionCode
+        versionName "${appVersionCode.intdiv(10)}.${appVersionCode % 10}"
     }
 
     signingConfigs {

@@ -249,7 +249,11 @@ public class RouterActivity extends Activity {
 
 	@Override
 	protected void onDestroy() {
-		if (web != null) web.destroy();
+		if (web != null) {
+			// detach first: destroying a web view still on screen is refused
+			if (web.getParent() instanceof android.view.ViewGroup) ((android.view.ViewGroup) web.getParent()).removeView(web);
+			web.destroy();
+		}
 		super.onDestroy();
 	}
 
