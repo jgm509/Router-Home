@@ -23,6 +23,8 @@ import javax.crypto.spec.GCMParameterSpec;
  * The saved routers. Kept in the app's private storage:
  *   list       JSON array of {id, name, addr, user, sshPort}
  *   pw.<id>    the router's password, encrypted with a key in the Android
+ *              keystore; "" for a router that has no password (an OpenWrt
+ *              where root's password was never set); also
  *              keystore (the key can't be read out of the phone)
  *   hk.<id>    the router's SSH host key: {type, key, fp}
  * Deleting a router deletes all three.
@@ -64,6 +66,7 @@ final class Routers {
 				JSONObject o = new JSONObject(r.toString());
 				String id = r.optString("id");
 				o.put("hasPassword", sp.contains("pw." + id));
+				o.put("noPassword", "".equals(sp.getString("pw." + id, null)));
 				JSONObject hk = hostKey(id);
 				if (hk != null) o.put("hostKey", hk.optString("type") + " " + hk.optString("fp"));
 				out.put(o);
@@ -105,6 +108,7 @@ final class Routers {
 
 		String pw = in.optString("password");
 		if (in.optBoolean("forgetPassword")) setPassword(id, null);
+		else if (in.optBoolean("noPassword")) setPassword(id, "");
 		else if (!pw.isEmpty()) setPassword(id, pw);
 		return id;
 	}
@@ -147,6 +151,7 @@ final class Routers {
 	synchronized String password(String id) {
 		String v = sp.getString("pw." + id, null);
 		if (v == null) return null;
+		if (v.isEmpty()) return "";	// the router has no password
 		try {
 			String[] p = v.split(":", 2);
 			byte[] iv = Base64.decode(p[0], Base64.NO_WRAP);
@@ -162,9 +167,14 @@ final class Routers {
 		}
 	}
 
+	/** null forgets it; "" remembers that the router has no password. */
 	synchronized void setPassword(String id, String pw) {
-		if (pw == null || pw.isEmpty()) {
+		if (pw == null) {
 			sp.edit().remove("pw." + id).apply();
+			return;
+		}
+		if (pw.isEmpty()) {
+			sp.edit().putString("pw." + id, "").apply();
 			return;
 		}
 		try {

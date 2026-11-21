@@ -217,6 +217,19 @@ public class TerminalActivity extends Activity {
 			l.countDown();
 		}
 
+		/** Puts text on the clipboard, for the Copy sheet's "Copy all". */
+		@JavascriptInterface
+		public void copy(String text) {
+			runOnUiThread(() -> {
+				ClipboardManager cm = getSystemService(ClipboardManager.class);
+				if (cm == null) return;
+				cm.setPrimaryClip(ClipData.newPlainText("SSH", text));
+				// Android 13 and newer show their own "Copied" message
+				if (android.os.Build.VERSION.SDK_INT < 33)
+					android.widget.Toast.makeText(TerminalActivity.this, "Copied", android.widget.Toast.LENGTH_SHORT).show();
+			});
+		}
+
 		/** The clipboard's text, for the Paste key. */
 		@JavascriptInterface
 		public String clipboard() {
@@ -296,7 +309,8 @@ public class TerminalActivity extends Activity {
 					s.connect(10000);
 				} catch (JSchException e) {
 					if (isAuthFailure(e)) {
-						print(fromStore ? "The saved password didn't work.\r\n" : "Wrong password.\r\n");
+						print(fromStore ? (pw.isEmpty() ? "The router has a password now.\r\n" : "The saved password didn't work.\r\n")
+								: "Wrong password.\r\n");
 						if (fromStore) store.setPassword(id, null);
 						pw = null;
 						continue;

@@ -34,6 +34,7 @@
 		<div class="group">
 			<label class="field"><span>User</span><input type="text" id="user" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="root"></label>
 			<label class="field"><span>Password</span><input type="password" id="pw" autocomplete="off"></label>
+			<label class="check"><input type="checkbox" id="noPw"> This router has no password</label>
 			<label class="check" id="forgetRow" hidden><input type="checkbox" id="forget"> Forget the saved password</label>
 		</div>
 		<p class="hint">Saved encrypted on this phone, and used to sign in to Router Home and SSH.</p>
@@ -106,7 +107,7 @@ function showList() {
 			el('span', { class: 'ic' }, icon('router')),
 			el('span', { class: 'main' },
 				el('span', { class: 'label' }, r.name),
-				el('span', { class: 'sub' }, r.user + ' @ ' + r.addr + (r.hasPassword ? '' : ' · password not saved')))),
+				el('span', { class: 'sub' }, r.user + ' @ ' + r.addr + (r.noPassword ? ' · no password' : r.hasPassword ? '' : ' · password not saved')))),
 		el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'SSH', title: 'SSH', onclick: () => RH.ssh(r.id) }, icon('term')),
 		el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Edit', title: 'Edit', onclick: () => showForm(r) }, icon('edit')))));
 	window.scrollTo(0, 0);
@@ -125,9 +126,11 @@ function showForm(r) {
 	$('addr').value = adding ? (old || '192.168.1.1') : r.addr;
 	$('user').value = adding ? 'root' : r.user;
 	$('pw').value = '';
-	$('pw').placeholder = !adding && r.hasPassword ? 'Saved (leave empty to keep it)' : '';
+	$('pw').placeholder = !adding && r.hasPassword && !r.noPassword ? 'Saved (leave empty to keep it)' : '';
 	$('forget').checked = false;
-	$('forgetRow').hidden = adding || !r.hasPassword;
+	$('forgetRow').hidden = adding || !r.hasPassword || r.noPassword;
+	$('noPw').checked = !adding && !!r.noPassword;
+	noPwChanged();
 	$('port').value = adding || r.sshPort === 22 ? '' : r.sshPort;
 	$('keyRow').hidden = adding || !r.hostKey;
 	$('key').textContent = adding ? '' : (r.hostKey || '');
@@ -146,7 +149,9 @@ function save() {
 	const r = {
 		id: editing.id || '', name: $('name').value.trim() || addr, addr,
 		user: $('user').value.trim() || 'root', sshPort: port,
-		password: $('pw').value, forgetPassword: $('forget').checked
+		password: $('noPw').checked ? '' : $('pw').value, noPassword: $('noPw').checked,
+		// unticking "no password" without typing one: nothing saved any more
+		forgetPassword: $('forget').checked || (!!editing.noPassword && !$('noPw').checked && !$('pw').value)
 	};
 	const id = RH.save(JSON.stringify(r));
 	$('pw').value = '';
@@ -174,6 +179,13 @@ function ask(title, text, yes, danger) {
 	});
 }
 
+function noPwChanged() {
+	const on = $('noPw').checked;
+	$('pw').disabled = on;
+	$('pw').closest('.field').style.opacity = on ? .45 : '';
+	if (on) $('pw').value = '';
+}
+$('noPw').onchange = noPwChanged;
 $('add').onclick = () => showForm(null);
 $('save').onclick = save;
 $('cancel').onclick = showList;

@@ -25,6 +25,8 @@ header .icon-btn { width: 36px; height: 36px; font-weight: 650; font-size: 14px;
 .keys button.on { background: var(--accent); color: var(--accent-ink); }
 .sheet .group { margin-top: 4px; }
 .sheet .detail { margin: 0 2px; padding: 12px 14px; border-radius: 14px; background: var(--surface); white-space: pre-wrap; }
+.sheet .text { margin: 0; padding: 12px 14px; border-radius: 14px; background: var(--surface); max-height: 58vh; overflow: auto;
+	font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
 </style>
 </head>
 <body>
@@ -84,6 +86,7 @@ const KEYS = [
 	['↑', () => arrow('A')], ['↓', () => arrow('B')], ['←', () => arrow('D')], ['→', () => arrow('C')],
 	['|', () => '|'], ['-', () => '-'], ['/', () => '/'], ['~', () => '~'],
 	['Home', () => '\x1b[H'], ['End', () => '\x1b[F'], ['PgUp', () => '\x1b[5~'], ['PgDn', () => '\x1b[6~'],
+	['Copy', () => { copyText(); return ''; }],
 	['Paste', () => { term.paste(Term.clipboard()); return ''; }]
 ];
 for (const [label, val] of KEYS) {
@@ -131,7 +134,7 @@ window.askPassword = o => {
 	const ok = () => answer({ pw: pw.value, remember: keep.checked });
 	pw.onkeydown = e => { if (e.key === 'Enter') ok(); };
 	const close = sheet([
-		el('h2', {}, o.title), el('p', {}, 'Password for ' + o.user + '.'),
+		el('h2', {}, o.title), el('p', {}, 'Password for ' + o.user + '. Leave it empty if the router has no password.'),
 		el('div', { class: 'group' },
 			el('label', { class: 'field' }, el('span', {}, 'Password'), pw),
 			el('label', { class: 'check' }, keep, 'Remember for this router')),
@@ -152,6 +155,35 @@ window.askYesNo = o => {
 			el('button', { class: 'btn' + (o.danger ? ' danger' : ''), type: 'button', onclick: () => answer(true) }, o.yes))
 	], () => answer(false));
 };
+/* copying: the terminal itself can't be selected by touch, so the Copy key
+ * shows its text as ordinary text, which Android can select and copy */
+function screenText(max) {
+	const b = term.buffer.active, out = [];
+	for (let i = Math.max(0, b.length - max); i < b.length; i++) {
+		const l = b.getLine(i);
+		if (!l) continue;
+		const t = l.translateToString(true);
+		if (l.isWrapped && out.length) out[out.length - 1] += t;
+		else out.push(t);
+	}
+	while (out.length && out[out.length - 1] === '') out.pop();
+	return out.join('\n');
+}
+function copyText() {
+	const text = screenText(1000);
+	const pre = el('pre', { class: 'text' }, text);
+	const done = () => close();
+	const close = sheet([
+		el('h2', {}, 'Copy'), el('p', {}, 'Touch and hold to select text, or copy everything.'),
+		pre,
+		el('div', { class: 'actions' },
+			el('button', { class: 'btn secondary', type: 'button', onclick: done }, 'Done'),
+			el('button', { class: 'btn', type: 'button', onclick: () => { Term.copy(text); close(); } }, 'Copy all'))
+	], done);
+	term.blur && term.blur();
+	setTimeout(() => { pre.scrollTop = pre.scrollHeight; }, 0);
+}
+
 window.back = () => { if (openSheet) { openSheet.cancel(); return true; } return false; };
 
 /* ---- called by the app ---- */
