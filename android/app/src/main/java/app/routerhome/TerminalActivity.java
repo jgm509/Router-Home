@@ -187,7 +187,8 @@ public class TerminalActivity extends Activity {
 		tsession = new TerminalSession(5000, new SessionClient());
 		term = new TerminalView(this, null);
 		term.setTerminalViewClient(new ViewClient());
-		term.setTypeface(Typeface.MONOSPACE);
+		// setTextSize creates the view's renderer (monospace by default): it
+		// must come before anything else that uses the renderer
 		term.setTextSize(sp(textSize));
 		term.setFocusable(true);
 		term.setFocusableInTouchMode(true);
