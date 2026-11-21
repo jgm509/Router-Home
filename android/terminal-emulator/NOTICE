@@ -1,0 +1,11 @@
+This module is Termux's terminal-emulator library, taken from
+https://github.com/termux/termux-app (commit 8629e63), which is released under
+the Apache License 2.0 (see LICENSE). It is based on Terminal Emulator for
+Android by Jack Palevich (Apache 2.0).
+
+Changes made for Router Home:
+- TerminalSession.java is rewritten: instead of starting a local shell through
+  native code (JNI), it shows what an SSH connection sends and passes typed
+  input to it (setLink / feed / disconnected).
+- JNI.java and the native code (src/main/jni) are removed.
+- build.gradle is new (no native build, no publishing).

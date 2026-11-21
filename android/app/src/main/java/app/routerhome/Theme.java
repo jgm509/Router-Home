@@ -77,6 +77,46 @@ final class Theme {
 		}
 	}
 
+	/** Router Home's colors (app.css) for native screens. */
+	static final class Colors {
+		int bg, surface, surface2, ink, muted, line, accent, accentInk, good, warn, bad;
+		boolean light;
+	}
+
+	static Colors colors(Context c) {
+		Colors k = new Colors();
+		String m = resolved(c);
+		k.light = "light".equals(m);
+		switch (m) {
+			case "dark": k.bg = 0xff16181b; k.surface = 0xff1f2226; k.surface2 = 0xff272b30; k.ink = 0xffe9ecef; k.muted = 0xff9aa2ab; k.line = 0xff30353b; break;
+			case "black": k.bg = 0xff000000; k.surface = 0xff101113; k.surface2 = 0xff1a1c1f; k.ink = 0xffeceff1; k.muted = 0xff8f979f; k.line = 0xff25282c; break;
+			case "midnight": k.bg = 0xff0c1520; k.surface = 0xff142130; k.surface2 = 0xff101b28; k.ink = 0xffe6edf4; k.muted = 0xff8d9cab; k.line = 0xff23344a; break;
+			default: k.bg = 0xfff3f5f7; k.surface = 0xffffffff; k.surface2 = 0xfff0f2f5; k.ink = 0xff161a1f; k.muted = 0xff5f6873; k.line = 0xffe2e6eb;
+		}
+		int[] acc; // light, dark
+		switch (accent(c)) {
+			case "ocean": acc = new int[] { 0xff2f6df6, 0xff5b8eff }; break;
+			case "forest": acc = new int[] { 0xff15803d, 0xff4ade80 }; break;
+			case "violet": acc = new int[] { 0xff7c3aed, 0xffa78bfa }; break;
+			case "rose": acc = new int[] { 0xffe11d48, 0xfffb7185 }; break;
+			case "teal": acc = new int[] { 0xff0f766e, 0xff2dd4bf }; break;
+			case "amber": acc = new int[] { 0xffb45309, 0xfffbbf24 }; break;
+			default: acc = new int[] { 0xffc2410c, 0xfffb7a3c };
+		}
+		if (k.light) {
+			k.accent = acc[0]; k.accentInk = 0xffffffff;
+			k.good = 0xff1f8a5b; k.warn = 0xffc98a06; k.bad = 0xffd9373d;
+		} else {
+			k.accent = acc[1]; k.accentInk = 0xff14100c;
+			k.good = 0xff3fbf86; k.warn = 0xfff0b429; k.bad = 0xffff5c61;
+		}
+		return k;
+	}
+
+	static String hex(int color) {
+		return String.format("#%06x", color & 0xffffff);
+	}
+
 	/** The script that reads Router Home's theme in a router page. */
 	static final String READ = "(function(){try{return JSON.stringify([localStorage.getItem('home-theme'),localStorage.getItem('home-accent')])}catch(e){return null}})()";
 

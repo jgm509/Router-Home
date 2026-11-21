@@ -1,0 +1,21 @@
+// Termux's terminal view (Apache 2.0), from github.com/termux/termux-app. See NOTICE.
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.termux.view'
+    compileSdk 35
+    defaultConfig {
+        minSdk 29
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    implementation 'androidx.annotation:annotation:1.9.0'
+    api project(':terminal-emulator')
+}

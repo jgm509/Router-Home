@@ -65,14 +65,11 @@ public class RouterActivity extends Activity {
 		web.addJavascriptInterface(new Bridge(), "RouterHomeApp");
 		web.setWebViewClient(new Client());
 		web.setWebChromeClient(new Chrome());
-		if (state != null && web.restoreState(state) != null) return;
+		// Always sign in fresh, even when Android recreates this screen after
+		// killing the app in the background: restoring the old page skipped the
+		// page scripts (signing out didn't go back to the list) and the session
+		// handed to the page was gone with the app, so it showed the sign-in.
 		signInAndLoad();
-	}
-
-	@Override
-	protected void onSaveInstanceState(Bundle out) {
-		if (web != null) web.saveState(out);
-		super.onSaveInstanceState(out);
 	}
 
 	@Override

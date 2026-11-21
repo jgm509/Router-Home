@@ -150,8 +150,9 @@ function save() {
 		id: editing.id || '', name: $('name').value.trim() || addr, addr,
 		user: $('user').value.trim() || 'root', sshPort: port,
 		password: $('noPw').checked ? '' : $('pw').value, noPassword: $('noPw').checked,
-		// unticking "no password" without typing one: nothing saved any more
-		forgetPassword: $('forget').checked || (!!editing.noPassword && !$('noPw').checked && !$('pw').value)
+		// a newly typed password wins over "Forget"; unticking "no password"
+		// without typing one: nothing saved any more
+		forgetPassword: !$('noPw').checked && !$('pw').value && ($('forget').checked || !!editing.noPassword)
 	};
 	const id = RH.save(JSON.stringify(r));
 	$('pw').value = '';

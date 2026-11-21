@@ -1,0 +1,22 @@
+// Termux's terminal emulator (Apache 2.0), from github.com/termux/termux-app.
+// Changed for Router Home: TerminalSession talks to an SSH connection instead
+// of starting a local shell, so the native (JNI) part is left out. See NOTICE.
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.termux.emulator'
+    compileSdk 35
+    defaultConfig {
+        minSdk 29
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    implementation 'androidx.annotation:annotation:1.9.0'
+}

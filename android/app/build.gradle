@@ -16,8 +16,8 @@ android {
         applicationId 'app.routerhome'
         minSdk 29
         targetSdk 34
-        versionCode 5
-        versionName '2.0.3'
+        versionCode 7
+        versionName '2.1.0'
     }
 
     signingConfigs {
@@ -40,6 +40,12 @@ android {
         }
     }
 
+    // the vendored Termux modules aren't ours to restyle: don't let lint stop a release build
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -60,20 +66,6 @@ dependencies {
     // SSH client; Bouncy Castle gives it Ed25519 and Curve25519 on Android
     implementation 'com.github.mwiede:jsch:0.2.16'
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+    // the terminal screen: Termux's terminal view (Apache 2.0, in this project)
+    implementation project(':terminal-view')
 }
-
-// The terminal (xterm.js) is downloaded once into the app's assets
-def xtermDir = file('src/main/assets/xterm')
-tasks.register('fetchXterm') {
-    outputs.dir xtermDir
-    onlyIf { !file("$xtermDir/xterm.js").exists() }
-    doLast {
-        xtermDir.mkdirs()
-        def cdn = 'https://cdn.jsdelivr.net/npm'
-        ant.get(src: "$cdn/@xterm/xterm@5.5.0/lib/xterm.js", dest: "$xtermDir/xterm.js")
-        ant.get(src: "$cdn/@xterm/xterm@5.5.0/css/xterm.css", dest: "$xtermDir/xterm.css")
-        ant.get(src: "$cdn/@xterm/addon-fit@0.10.0/lib/addon-fit.js", dest: "$xtermDir/addon-fit.js")
-        ant.get(src: "$cdn/@xterm/xterm@5.5.0/LICENSE", dest: "$xtermDir/LICENSE")
-    }
-}
-tasks.named('preBuild') { dependsOn 'fetchXterm' }

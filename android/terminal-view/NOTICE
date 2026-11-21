@@ -1,0 +1,8 @@
+This module is Termux's terminal-view library, taken from
+https://github.com/termux/termux-app (commit 8629e63), which is released under
+the Apache License 2.0 (see LICENSE). It is based on Terminal Emulator for
+Android by Jack Palevich (Apache 2.0).
+
+Changes made for Router Home:
+- build.gradle is new (no publishing). The Java sources and resources are
+  unchanged.
